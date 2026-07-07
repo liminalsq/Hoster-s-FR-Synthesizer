@@ -123,31 +123,33 @@
     l: { f: [500, 820, 2400], voiced: true },
 
     // consonants & sibilants (some flagged voiced/unvoiced)
-    h: { f: [800, 1800, 3200], breathy: true, amp: 0.9, voiced: false },
-    s: { f: [3000, 5000, 7000], breathy: true, amp: 1.4, voiced: false },
-    z: { f: [3000, 4500, 6000], breathy: true, amp: 1.4, voiced: true },
-    t: { f: [1000, 4500, 7000], burst: true, amp: 0.6, voiced: false },
-    d: { f: [600, 4000, 6500], burst: true, amp: 0.6, voiced: false, short: true },
-    k: { f: [1200, 2000, 3200], burst: true, short: true, voiced: false },
-    g: { f: [900, 1700, 2700], breathy: true, burst: true, voiced: true, short: true },
+    // Lower noise-related formant centers by ~50 to reduce harsh high-frequency energy.
+    h: { f: [750, 1750, 3150], breathy: true, amp: 0.9, voiced: false },
+    s: { f: [2950, 4950, 6950], breathy: true, amp: 1.4, voiced: false },
+    z: { f: [2950, 4450, 5950], breathy: true, amp: 1.4, voiced: true },
+    t: { f: [950, 4450, 6950], burst: true, amp: 0.6, voiced: false },
+    d: { f: [550, 3950, 6450], burst: true, amp: 0.6, voiced: false, short: true },
+    k: { f: [1150, 1950, 3150], burst: true, short: true, voiced: false },
+    g: { f: [850, 1650, 2650], breathy: true, burst: true, voiced: true, short: true },
+
     // nasals: flagged nasal: true
-    n: { f: [300, 1300, 2500], voiced: true, nasal: true },
-    m: { f: [250, 1100, 2100], voiced: true, nasal: true },
-    b: { f: [355, 1150, 2100], breathy: true, burst: true, voiced: true, short: true },
-    p: { f: [1000, 1800, 2700], burst: true, short: true, voiced: false },
-    f: { f: [1200, 3000, 5000], breathy: true, voiced: false },
-    v: { f: [1200, 2800, 4800], breathy: true, voiced: true },
-    th: { f: [1200, 2200, 3500], breathy: true, voiced: false },
-    sh: { f: [2500, 3500, 5000], breathy: true, voiced: false },
-    ch: { f: [2000, 3000, 4500], breathy: true, burst: true, voiced: false },
-    uh: { f: [690, 995, 2600], voiced: true },
+    n: { f: [250, 1250, 2450], voiced: true, nasal: true },
+    m: { f: [200, 1050, 2050], voiced: true, nasal: true },
+    b: { f: [305, 1100, 2050], breathy: true, burst: true, voiced: true, short: true },
+    p: { f: [950, 1750, 2650], burst: true, short: true, voiced: false },
+    f: { f: [1150, 2950, 4950], breathy: true, voiced: false },
+    v: { f: [1150, 2750, 4750], breathy: true, voiced: true },
+    th: { f: [1150, 2150, 3450], breathy: true, voiced: false },
+    sh: { f: [2450, 3450, 4950], breathy: true, voiced: false },
+    ch: { f: [1950, 2950, 4450], breathy: true, burst: true, voiced: false },
+    uh: { f: [640, 945, 2550], voiced: true },
 
     // added phones / fallbacks
-    er: { f: [600, 1250, 2500], voiced: true },
-    j: { f: [500, 1600, 2600], voiced: true },
-    ng: { f: [250, 900, 2000], voiced: true, nasal: true },
-    oy: { f: [450, 900, 2600], voiced: true },
-    aw: { f: [700, 1300, 2600], voiced: true },
+    er: { f: [550, 1200, 2450], voiced: true },
+    j: { f: [450, 1550, 2550], voiced: true },
+    ng: { f: [200, 850, 1950], voiced: true, nasal: true },
+    oy: { f: [400, 850, 2550], voiced: true },
+    aw: { f: [650, 1250, 2550], voiced: true },
     rest: { f: [0, 0, 0], voiced: false, burst: false, short: false, breathy: false }
   };
 
@@ -288,7 +290,13 @@
 
   // parseInput async: supports grid types and uses textToPhonemes for words
   const parseInput = async (text, beatLen, gridType = "beats", stepsPerBeat = 4) => {
-    const regex = /([a-zA-Z']+)\s*<([\w#b]+)\s*,\s*([\d.]+)>/gi;
+  // Token formats:
+  // phon <NOTE,duration>
+  // phon <NOTE,duration,vibFreqHz,vibDelayBeats,vibFadeInBeats,vibSpeedBeats>
+  // Phoneme vibrato fields:
+  // - vibDelay, vibFadeIn, vibSpeed are in BEATS-based units (user spec says beats-per-sec).
+  // - NOTE is a pitch name (e.g. C#4) and duration is in units per gridType.
+    const regex = /([a-zA-Z']+)\s*<\s*([\w#b]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?\s*>/gi;
     const result = [];
     let match;
     while ((match = regex.exec(text)) !== null) {
@@ -296,6 +304,13 @@
       const token = tokenRaw.toLowerCase();
       const pitchRaw = match[2];
       const units = parseFloat(match[3]);
+
+      // Optional per-phoneme vibrato fields (beats-based):
+      // match[4]=vibFreqHz, match[5]=vibDelayBeats, match[6]=vibFadeInBeats, match[7]=vibSpeedBeats
+      const vibFreqHz = match[4] != null ? parseFloat(match[4]) : null;
+      const vibDelayBeats = match[5] != null ? parseFloat(match[5]) : null;
+      const vibFadeInBeats = match[6] != null ? parseFloat(match[6]) : null;
+      const vibSpeedBeats = match[7] != null ? parseFloat(match[7]) : null;
 
       // compute duration from units based on grid type
       let dur = 0;
@@ -308,6 +323,21 @@
       if (phonemeMap[token]) {
         let p = { key: token, ...phonemeMap[token], d: dur, pitch: noteToFreq(pitchRaw) };
         p.f = getAdjustedFormants(p.f);
+
+        // Per-phoneme vibrato: vibFreqHz is optional (if null/NaN => fallback to global vibFreq)
+        // vibDelay/ vFadeIn/ vibSpeed are in BEATS (converted to seconds using beatLen).
+        // Input rule: vibFreqHz === 0 counts as provided input, so we only fallback when vibFreqHz is null/NaN.
+        const vibProvided = vibFreqHz !== null && Number.isFinite(vibFreqHz);
+        p.vibFreq = vibProvided ? vibFreqHz : vibFreq;
+        p.vibDelay = vibDelayBeats != null && Number.isFinite(vibDelayBeats) ? vibDelayBeats * beatLen : vibDelay;
+        p.vibFadeIn = vibFadeInBeats != null && Number.isFinite(vibFadeInBeats) ? vibFadeInBeats * beatLen : 0;
+        p.vibSpeed = vibSpeedBeats != null && Number.isFinite(vibSpeedBeats) ? vibSpeedBeats : null;
+
+        // Back-compat: if vibSpeed is provided we map it to vibFreq as an override.
+        if (p.vibSpeed !== null && Number.isFinite(p.vibSpeed)) {
+          p.vibFreq = p.vibSpeed;
+        }
+
         result.push(p);
         continue;
       }
@@ -321,6 +351,17 @@
         if (phonemeMap[key]) {
           let p = { key, ...phonemeMap[key], d: partDur, pitch: noteToFreq(pitchRaw) };
           p.f = getAdjustedFormants(p.f);
+
+          // Per-phoneme vibrato fields (propagate from original token)
+          const vibProvided = vibFreqHz !== null && Number.isFinite(vibFreqHz);
+          p.vibFreq = vibProvided ? vibFreqHz : vibFreq;
+          p.vibDelay = vibDelayBeats != null && Number.isFinite(vibDelayBeats) ? vibDelayBeats * beatLen : vibDelay;
+          p.vibFadeIn = vibFadeInBeats != null && Number.isFinite(vibFadeInBeats) ? vibFadeInBeats * beatLen : 0;
+          p.vibSpeed = vibSpeedBeats != null && Number.isFinite(vibSpeedBeats) ? vibSpeedBeats : null;
+          if (p.vibSpeed !== null && Number.isFinite(p.vibSpeed)) {
+            p.vibFreq = p.vibSpeed;
+          }
+
           result.push(p);
         } else {
           const fallbackMap = {
@@ -332,6 +373,17 @@
           const fm = (fallbackMap[key] || "rest");
           let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch: noteToFreq(pitchRaw) };
           p.f = getAdjustedFormants(p.f);
+
+          // Per-phoneme vibrato fields (propagate from original token)
+          const vibProvided = vibFreqHz !== null && Number.isFinite(vibFreqHz);
+          p.vibFreq = vibProvided ? vibFreqHz : vibFreq;
+          p.vibDelay = vibDelayBeats != null && Number.isFinite(vibDelayBeats) ? vibDelayBeats * beatLen : vibDelay;
+          p.vibFadeIn = vibFadeInBeats != null && Number.isFinite(vibFadeInBeats) ? vibFadeInBeats * beatLen : 0;
+          p.vibSpeed = vibSpeedBeats != null && Number.isFinite(vibSpeedBeats) ? vibSpeedBeats : null;
+          if (p.vibSpeed !== null && Number.isFinite(p.vibSpeed)) {
+            p.vibFreq = p.vibSpeed;
+          }
+
           result.push(p);
         }
       }
@@ -339,14 +391,50 @@
     return result;
   };
 
-  // noise buffer for breathy / sibilant sounds
-  const createWhisperNoiseBuffer = (ctx, duration) => {
+  // noise buffers
+  // Spec update: NEVER use brown noise for TTS.
+  // Use:
+  // - White noise for unvoiced fricatives & bursts
+  // - Pink noise for voiced fricatives & aspiration
+
+  const createWhiteNoiseBuffer = (ctx, duration, amp = 0.25) => {
     const len = Math.max(1, Math.floor(duration * ctx.sampleRate));
     const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buffer.getChannelData(0);
-    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * 0.25;
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * amp;
     return buffer;
   };
+
+  // Paul Kellet pink noise (filter method)
+  const createPinkNoiseBuffer = (ctx, duration, amp = 0.25) => {
+    const len = Math.max(1, Math.floor(duration * ctx.sampleRate));
+    const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+
+    let b0 = 0, b1 = 0, b2 = 0;
+    for (let i = 0; i < len; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99765 * b0 + white * 0.0990460;
+      b1 = 0.96300 * b1 + white * 0.2965164;
+      b2 = 0.57000 * b2 + white * 1.0526913;
+      const pink = b0 + b1 + b2 + white * 0.1848;
+      data[i] = pink * amp;
+    }
+    return buffer;
+  };
+
+  // Kept for back-compat, but now defaults to WHITE (unvoiced).
+  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.25) => createWhiteNoiseBuffer(ctx, duration, amp);
+
+  // Pick noise type by phonation.
+  // voiced fricatives/aspiration => pink
+  // unvoiced fricatives/bursts => white
+  const createFricativeNoiseBuffer = (ctx, duration, { voiced = false, amp = 0.25 } = {}) => {
+    return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
+  };
+
+
+
 
   // synthesize with nasal-aware transitions and humanizing features
   const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1) => {
@@ -359,11 +447,15 @@
 
       // Feature 3: If b or p and no previous voiced, prepend m
       if ((p.key === 'b' || p.key === 'p') && !hasPrevVoiced) {
+        // Prepend a brief m, but keep it quieter to avoid loud noise bursts.
+        // 40% quieter than normal m -> amp scale 0.6
         const mDur = Math.min(0.05, p.d * 0.1); // short m
-        const mPhoneme = { key: 'm', ...phonemeMap['m'], d: mDur, pitch: p.pitch };
+        const mPhoneme = { key: 'm', ...phonemeMap['m'], d: mDur, pitch: p.pitch, amp: (phonemeMap['m'].amp ?? 1) * 0.6 };
         processedSeq.push(mPhoneme);
         p.d -= mDur; // trim p/b duration
       }
+
+
 
       // Feature 2: If t,b,p,k after s or z, add silence delay
       if ((p.key === 't' || p.key === 'b' || p.key === 'p' || p.key === 'k') && prev && (prev.key === 's' || prev.key === 'z')) {
@@ -460,8 +552,10 @@
       return null;
     };
 
-    // create a short nasal noise burst scheduled in the morph window
-    const scheduleNasalBurst = (morphStart, morphEnd, depth = 0.6) => {
+      // create a short nasal noise burst scheduled in the morph window
+      // Nasal airflow behaves more like aspiration: use PINK.
+      const scheduleNasalBurst = (morphStart, morphEnd, depth = 0.6) => {
+
       // bandpass centered low (~250-400Hz) for nasal resonance
       const nasalFilter = ctx.createBiquadFilter();
       nasalFilter.type = "bandpass";
@@ -474,7 +568,7 @@
 
       const dur = Math.max(0.001, morphEnd - morphStart);
       const src = ctx.createBufferSource();
-      src.buffer = createWhisperNoiseBuffer(ctx, dur + 0.02);
+      src.buffer = createFricativeNoiseBuffer(ctx, dur + 0.02, { voiced: true, amp: 0.25 });
 
       // envelope: ramp in at morphStart, ramp out at morphEnd
       nasalGain.gain.setValueAtTime(0, morphStart - 0.001);
@@ -487,11 +581,15 @@
       src.stop(morphEnd + 0.02);
     };
 
+
     // consonant noise generator with subtle fade-in
-    const playConsonantNoise = (t, d, fArr, amp = 1) => {
+      const playConsonantNoise = (t, d, fArr, amp = 1) => {
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
-      src.buffer = createWhisperNoiseBuffer(ctx, d);
+        // unvoiced fricatives/bursts => WHITE
+      // quieter than voice (p/b artifact fix)
+      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: false, amp: 0.15 });
+
       const consonantGain = ctx.createGain();
       consonantGain.gain.setValueAtTime(0, t);
       consonantGain.gain.linearRampToValueAtTime(amp, t + 0.01); // subtle fade-in over 0.01s
@@ -508,6 +606,7 @@
       src.start(t);
       src.stop(t + d + 0.005);
     };
+
 
     // main play routine
     const play = (t, d, f, opt = {}, nextVoiced = null, immediateNext = null) => {
@@ -603,8 +702,37 @@
       pitchParam.setValueAtTime(pitch, t);
 
       // vibrato
-      if (vibActive && lfoGain) {
+      // If vibFreq is provided for this phoneme (including vibFreq=0), override global vibrato settings.
+      // Delay/FadeIn/Speed fields are beats-based (Delay/FadeIn) and treated like existing "vibFreq" semantics for rate.
+      const vibFreqForNote = Number.isFinite(p.vibFreq) ? p.vibFreq : vibFreq;
+      const vibDelayForNoteSec = Number.isFinite(p.vibDelay) ? p.vibDelay : vibDelay;
+      const vibFadeInForNoteSec = Number.isFinite(p.vibFadeIn) ? p.vibFadeIn : 0;
+      const vibSpeedForNote = Number.isFinite(p.vibSpeed) ? p.vibSpeed : null;
+
+      const vibForThis = (vibFreqForNote > 0 && vibDepth > 0 && mode !== "whisper");
+      if (vibForThis && lfoGain && persistentVib) {
+        // Persistent vibrato only: we can’t retime the global LFO per-note.
+        // Use global persistent vibrato.
         lfoGain.connect(pitchParam);
+      } else if (vibForThis) {
+        // Non-persistent or per-note retiming: schedule a per-phoneme LFO.
+        const lfol = ctx.createOscillator();
+        const lfoGl = ctx.createGain();
+        lfol.type = "sine";
+
+        // “speed” overrides the LFO rate (keeps existing global-vibFreq semantics)
+        const lfoRateHz = (vibSpeedForNote != null && vibSpeedForNote > 0) ? vibSpeedForNote : vibFreqForNote;
+        lfol.frequency.setValueAtTime(lfoRateHz, t);
+
+        // Apply delay via start time and fadeIn via gain envelope
+        const fadeStart = t + vibDelayForNoteSec;
+        const fadeEnd = fadeStart + Math.max(0, vibFadeInForNoteSec);
+        lfoGl.gain.setValueAtTime(0, fadeStart);
+        lfoGl.gain.linearRampToValueAtTime(vibDepth, fadeEnd);
+
+        lfol.connect(lfoGl).connect(pitchParam);
+        lfol.start(fadeStart);
+        lfol.stop(t + d + 0.02);
       } else if (!persistentVib && vibFreq > 0 && vibDepth > 0) {
         const lfol = ctx.createOscillator();
         const lfoGl = ctx.createGain();
@@ -641,11 +769,13 @@
       // If breathy component, route a noise source via sharedNoiseFilters as well
       if (opt.breathy) {
         const noiseSrc = ctx.createBufferSource();
-        noiseSrc.buffer = createWhisperNoiseBuffer(ctx, d);
+        // voiced-ish breathy component/aspiration => PINK
+        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.25 });
         for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
         noiseSrc.start(t);
         noiseSrc.stop(t + d + 0.005);
       }
+
 
       osc.start(t);
       osc.stop(t + d + fadeTime);
@@ -786,11 +916,13 @@
         // breathy
         if (p.breathy) {
           const noiseSrc = ctx.createBufferSource();
-          noiseSrc.buffer = createWhisperNoiseBuffer(ctx, p.d);
+          // voiced-ish breathy component/aspiration => PINK
+          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.25 });
           for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
           noiseSrc.start(t);
           noiseSrc.stop(t + p.d + 0.005);
         }
+
 
       } else {
         // non-voiced or whisper
@@ -882,6 +1014,17 @@
       <button id="synthBtn" style="padding:6px 12px">ðŸŽ¤ Synthesize</button>
       <span id="status" style="margin-left:10px;font-size:12px;color:#444"></span>
     </div>
+    <div style="margin-top:6px; padding-top:8px; border-top:1px dashed #ddd;">
+      <div style="font-size:12px; margin-bottom:4px">Output normalization (applies to preview + downloaded WAV)</div>
+      <label style="font-size:12px; display:block">
+        <input type="checkbox" id="enableNormalize" checked/> Enable normalize
+      </label>
+      <label style="font-size:12px; display:flex; align-items:center; gap:8px; margin-top:4px;">
+        Target dBFS:
+        <input type="number" id="normalizeTargetDb" value="-20" step="0.1" style="width:90px"/>
+      </label>
+    </div>
+
     <div style="margin-top:10px; padding-top:8px; border-top:1px dashed #ddd;">
       <div style="font-size:12px; margin-bottom:6px">MIDI Import</div>
       <label>Midi file: <input type="file" id="midiFile" accept=".mid,.midi,audio/midi,application/octet-stream"/></label>
@@ -1260,8 +1403,39 @@
       statusEl.textContent = "Done";
 
       // WAV creation & preview
-      const audioData = renderedBuffer.getChannelData(0);
+      const audioDataRaw = renderedBuffer.getChannelData(0);
+
+      // Optional output normalization (preview + downloaded WAV)
+      const enableNormalize = !!container.querySelector("#enableNormalize")?.checked;
+      const normalizeTargetDb = parseFloat(container.querySelector("#normalizeTargetDb")?.value);
+
+      let audioData = audioDataRaw;
+      if (enableNormalize && Number.isFinite(normalizeTargetDb)) {
+        // dBFS for full scale = 1.0 amplitude.
+        // Map RMS to target, with a small epsilon to avoid div by 0.
+        const eps = 1e-12;
+        let sumSq = 0;
+        for (let i = 0; i < audioDataRaw.length; i++) {
+          const x = audioDataRaw[i];
+          sumSq += x * x;
+        }
+        const rms = Math.sqrt(sumSq / Math.max(1, audioDataRaw.length));
+        if (rms > eps) {
+          const rmsDb = 20 * Math.log10(rms);
+          const gainDb = normalizeTargetDb - rmsDb;
+          const gain = Math.pow(10, gainDb / 20);
+          audioData = new Float32Array(audioDataRaw.length);
+          for (let i = 0; i < audioDataRaw.length; i++) audioData[i] = audioDataRaw[i] * gain;
+          // hard-clip safety
+          for (let i = 0; i < audioData.length; i++) {
+            if (audioData[i] > 1) audioData[i] = 1;
+            else if (audioData[i] < -1) audioData[i] = -1;
+          }
+        }
+      }
+
       const wavBuffer = new ArrayBuffer(44 + audioData.length * 2);
+
       const view = new DataView(wavBuffer);
       const writeString = (offset, str) => {
         for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
@@ -1283,6 +1457,7 @@
         const s = Math.max(-1, Math.min(1, audioData[i]));
         view.setInt16(44 + i * 2, s * 32767, true);
       }
+
       const blob = new Blob([view], { type: "audio/wav" });
       const url = URL.createObjectURL(blob);
       const dl = document.createElement("a");
@@ -1299,10 +1474,14 @@
       playBtn.onclick = () => {
         const actx = new (window.AudioContext || window.webkitAudioContext)();
         const src = actx.createBufferSource();
-        src.buffer = renderedBuffer;
+        // Preview should match the downloaded WAV (normalized if enabled).
+        const previewBuf = actx.createBuffer(1, audioData.length, sampleRate);
+        previewBuf.getChannelData(0).set(audioData);
+        src.buffer = previewBuf;
         src.connect(actx.destination);
         src.start();
       };
+
       outputControls.appendChild(playBtn);
 
     } catch (err) {
