@@ -397,7 +397,7 @@
   // - White noise for unvoiced fricatives & bursts
   // - Pink noise for voiced fricatives & aspiration
 
-  const createWhiteNoiseBuffer = (ctx, duration, amp = 0.25) => {
+  const createWhiteNoiseBuffer = (ctx, duration, amp = 0.08) => {
     const len = Math.max(1, Math.floor(duration * ctx.sampleRate));
     const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -424,12 +424,12 @@
   };
 
   // Kept for back-compat, but now defaults to WHITE (unvoiced).
-  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.25) => createWhiteNoiseBuffer(ctx, duration, amp);
+  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09) => createWhiteNoiseBuffer(ctx, duration, amp);
 
   // Pick noise type by phonation.
   // voiced fricatives/aspiration => pink
   // unvoiced fricatives/bursts => white
-  const createFricativeNoiseBuffer = (ctx, duration, { voiced = false, amp = 0.25 } = {}) => {
+  const createFricativeNoiseBuffer = (ctx, duration, { voiced = false, amp = 0.0 } = {}) => {
     return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
   };
 
@@ -554,7 +554,7 @@
 
       // create a short nasal noise burst scheduled in the morph window
       // Nasal airflow behaves more like aspiration: use PINK.
-      const scheduleNasalBurst = (morphStart, morphEnd, depth = 0.6) => {
+      const scheduleNasalBurst = (morphStart, morphEnd, depth = 0.4) => {
 
       // bandpass centered low (~250-400Hz) for nasal resonance
       const nasalFilter = ctx.createBiquadFilter();
@@ -568,7 +568,7 @@
 
       const dur = Math.max(0.001, morphEnd - morphStart);
       const src = ctx.createBufferSource();
-      src.buffer = createFricativeNoiseBuffer(ctx, dur + 0.02, { voiced: true, amp: 0.25 });
+      src.buffer = createFricativeNoiseBuffer(ctx, dur + 0.02, { voiced: true, amp: 0.1 });
 
       // envelope: ramp in at morphStart, ramp out at morphEnd
       nasalGain.gain.setValueAtTime(0, morphStart - 0.001);
@@ -587,8 +587,10 @@
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
         // unvoiced fricatives/bursts => WHITE
-      // quieter than voice (p/b artifact fix)
-      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: false, amp: 0.15 });
+      // quiet base so voice dominates (fixes nasal artifact audibility)
+      // amp param is used only for envelope peak.
+      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: false, amp: 0.08 });
+
 
       const consonantGain = ctx.createGain();
       consonantGain.gain.setValueAtTime(0, t);
@@ -655,7 +657,9 @@
           } catch (e) {}
         }
         // schedule nasal burst (filtered noise) in morph window to add "nah"/nasal timbre
-        scheduleNasalBurst(morphStart, morphEnd, Math.max(0.2, 0.6 * (opt.amp || 1)));
+        // Reduced depth to prevent artifacts on g/b and other morph-to-nasal contexts.
+        scheduleNasalBurst(morphStart, morphEnd, Math.max(0.05, 0.1 * (opt.amp || 1)));
+
       } else if (hasVoicedTarget) {
         // normal morph-to-next voiced formants
         for (let idx = 0; idx < numFormants; idx++) {
@@ -770,7 +774,7 @@
       if (opt.breathy) {
         const noiseSrc = ctx.createBufferSource();
         // voiced-ish breathy component/aspiration => PINK
-        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.25 });
+        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.05 });
         for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
         noiseSrc.start(t);
         noiseSrc.stop(t + d + 0.005);
@@ -888,7 +892,9 @@
               voiceGains[idx].gain.linearRampToValueAtTime(1, morphEnd + 0.01);
             } catch (e) {}
           }
-          scheduleNasalBurst(morphStart, morphEnd, Math.max(0.2, 0.6 * (p.amp || 1)));
+        // Clamp nasal burst depth so nasal phones (m/ng/n) don't become too audible/noisy
+        scheduleNasalBurst(morphStart, morphEnd, Math.max(0.08, 0.1 * (p.amp || 1)));
+
         } else if (hasVoicedTarget) {
           for (let idx = 0; idx < numFormants; idx++) {
             const curVal = (p.f && p.f[idx]) || 0;
@@ -917,7 +923,7 @@
         if (p.breathy) {
           const noiseSrc = ctx.createBufferSource();
           // voiced-ish breathy component/aspiration => PINK
-          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.25 });
+          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.05 });
           for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
           noiseSrc.start(t);
           noiseSrc.stop(t + p.d + 0.005);
