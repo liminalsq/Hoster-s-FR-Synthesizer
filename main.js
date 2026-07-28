@@ -124,24 +124,24 @@
 
     // consonants & sibilants (some flagged voiced/unvoiced)
     // Lower noise-related formant centers by ~50 to reduce harsh high-frequency energy.
-    h: { f: [750, 1750, 3150], breathy: true, amp: 0.9, voiced: false },
-    s: { f: [2950, 4950, 6950], breathy: true, amp: 1.4, voiced: false },
-    z: { f: [2950, 4450, 5950], breathy: true, amp: 1.4, voiced: true },
-    t: { f: [950, 4450, 6950], burst: true, amp: 0.6, voiced: false },
-    d: { f: [550, 3950, 6450], burst: true, amp: 0.6, voiced: false, short: true },
-    k: { f: [1150, 1950, 3150], burst: true, short: true, voiced: false },
-    g: { f: [850, 1650, 2650], breathy: true, burst: true, voiced: true, short: true },
+    h: { f: [750, 1750, 3150], breathy: true, amp: 0.9, voiced: false, noiseAmp: 1 },
+    s: { f: [2950, 4950, 3450], breathy: true, amp: 1.4, voiced: false, noiseAmp: 1 },
+    z: { f: [2950, 4450, 4950], breathy: true, amp: 1.4, voiced: true, noiseAmp: 1 },
+    t: { f: [950, 4450, 2950], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
+    d: { f: [585, 3560, 1705], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: .5, morphs: false },
+    k: { f: [1150, 1950, 3150], burst: true, short: true, voiced: false, noiseAmp: 1 },
+    g: { f: [850, 1650, 2650], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 1 },
 
     // nasals: flagged nasal: true
-    n: { f: [250, 1250, 2450], voiced: true, nasal: true },
-    m: { f: [200, 1050, 2050], voiced: true, nasal: true },
-    b: { f: [305, 1100, 2050], breathy: true, burst: true, voiced: true, short: true },
-    p: { f: [950, 1750, 2650], burst: true, short: true, voiced: false },
-    f: { f: [1150, 2950, 4950], breathy: true, voiced: false },
-    v: { f: [1150, 2750, 4750], breathy: true, voiced: true },
-    th: { f: [1150, 2150, 3450], breathy: true, voiced: false },
-    sh: { f: [2450, 3450, 4950], breathy: true, voiced: false },
-    ch: { f: [1950, 2950, 4450], breathy: true, burst: true, voiced: false },
+    n: { f: [250, 1250, 2450], voiced: true, nasal: true, noiseAmp: 1 },
+    m: { f: [200, 1050, 2050], voiced: true, nasal: true, noiseAmp: 1 },
+    b: { f: [305, 1100, 2050], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 1, morphs: true },
+    p: { f: [950, 1750, 2650], burst: true, short: true, voiced: false, noiseAmp: 1 },
+    f: { f: [1150, 2950, 4950], breathy: true, voiced: false, noiseAmp: 1 },
+    v: { f: [1150, 2750, 4750], breathy: true, voiced: true, noiseAmp: 1 },
+    th: { f: [1150, 2150, 3450], breathy: true, voiced: false, noiseAmp: 1 },
+    sh: { f: [2450, 3450, 4950], breathy: true, voiced: false, noiseAmp: 1 },
+    ch: { f: [1950, 2950, 4450], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
     uh: { f: [640, 945, 2550], voiced: true },
 
     // added phones / fallbacks
@@ -583,18 +583,18 @@
 
 
     // consonant noise generator with subtle fade-in
-      const playConsonantNoise = (t, d, fArr, amp = 1) => {
+      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1) => {
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
         // unvoiced fricatives/bursts => WHITE
       // quiet base so voice dominates (fixes nasal artifact audibility)
       // amp param is used only for envelope peak.
-      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: false, amp: 0.08 });
+      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: false, amp: 0.08 * noiseAmp });
 
 
       const consonantGain = ctx.createGain();
       consonantGain.gain.setValueAtTime(0, t);
-      consonantGain.gain.linearRampToValueAtTime(amp, t + 0.01); // subtle fade-in over 0.01s
+      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp, t + 0.01); // subtle fade-in over 0.01s
       const consonantFilters = fArr.map(freq => {
         const bf = ctx.createBiquadFilter();
         bf.type = "bandpass";
@@ -616,8 +616,8 @@
       if (d <= 0) return;
 
       // If current phoneme is consonant/unvoiced or purely breathy/burst -> produce consonant-filtered noise
-      if (!voiced || opt.breathy || opt.burst) {
-        playConsonantNoise(t, d, f, amp);
+      if (opt.breathy || opt.burst) {
+        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1);
         // If it's not voiced at all, we're done
         if (!voiced) return;
       }
@@ -626,7 +626,8 @@
       if (!shouldVoice) return;
 
       // determine morph behaviour: skip consonants for target as before
-      const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced;
+      // Check nextVoiced.morphs — if false, the next phone plays instantly without morph transition
+      const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
 
       // if target is nasal, schedule a nasal transition instead of morphing formants toward nasal targets
       const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
@@ -773,11 +774,12 @@
         osc.connect(oscGain).connect(voiceFilters[idx]);
       }
 
-      // If breathy component, route a noise source via sharedNoiseFilters as well
+// If breathy component, route a noise source via sharedNoiseFilters as well
       if (opt.breathy) {
         const noiseSrc = ctx.createBufferSource();
         // voiced-ish breathy component/aspiration => PINK
-        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.05 });
+        const breathyNoiseAmp = (opt.noiseAmp ?? 1);
+        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.05 * breathyNoiseAmp });
         for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
         noiseSrc.start(t);
         noiseSrc.stop(t + d + 0.005);
@@ -876,7 +878,7 @@
         lastVoicedEnd = t + p.d;
 
         // morphing logic
-        const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced;
+        const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
         const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
         const morphStart = t + Math.max(0, p.d - morphTime);
         const morphEnd = t + p.d;
@@ -926,7 +928,8 @@
         if (p.breathy) {
           const noiseSrc = ctx.createBufferSource();
           // voiced-ish breathy component/aspiration => PINK
-          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.05 });
+          const breathyNoiseAmp = (p.noiseAmp ?? 1);
+          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.05 * breathyNoiseAmp });
           for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
           noiseSrc.start(t);
           noiseSrc.stop(t + p.d + 0.005);
@@ -947,7 +950,7 @@
 
         // play consonant noise
         if (!p.voiced || mode === "whisper") {
-          playConsonantNoise(t, p.d, p.f, p.amp);
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1);
         }
       }
 
@@ -1498,21 +1501,37 @@
       dl.style = "display:inline-block;margin-right:8px;margin-top:8px;";
       outputControls.appendChild(dl);
 
+      let actx = new (window.AudioContext || window.webkitAudioContext)();
+      let prevSrc
+      let previewBuf
 
       const playBtn = document.createElement("button");
-      playBtn.textContent = "â–¶ Preview"; playBtn.style = "margin-top:8px;padding:6px 12px;";
+      playBtn.textContent = "Preview"; playBtn.style = "margin-top:8px;padding:6px 12px;";
       playBtn.onclick = () => {
-        const actx = new (window.AudioContext || window.webkitAudioContext)();
-        const src = actx.createBufferSource();
+        if (prevSrc) return;
+        actx = new (window.AudioContext || window.webkitAudioContext)();
+        prevSrc = actx.createBufferSource();
         // Preview should match the downloaded WAV (normalized if enabled).
-        const previewBuf = actx.createBuffer(1, audioData.length, sampleRate);
+        previewBuf = actx.createBuffer(1, audioData.length, sampleRate);
         previewBuf.getChannelData(0).set(audioData);
-        src.buffer = previewBuf;
-        src.connect(actx.destination);
-        src.start();
+        prevSrc.buffer = previewBuf;
+        prevSrc.connect(actx.destination);
+        prevSrc.start();
+      };
+
+      const stopBtn = document.createElement("button");
+      stopBtn.textContent = "Stop Preview"; stopBtn.style = "margin-top:8px;padding:6px 12px;";
+      stopBtn.onclick = () => {
+        if (!prevSrc || !actx.destination) return;
+        prevSrc.disconnect(actx.destination);
+        prevSrc.stop();
+
+        prevSrc = null;
+        actx.close();
       };
 
       outputControls.appendChild(playBtn);
+      outputControls.appendChild(stopBtn);
 
     } catch (err) {
       console.error(err);
