@@ -665,16 +665,19 @@
         for (let idx = 0; idx < numFormants; idx++) {
           const curVal = (f && f[idx]) || 0;
           const nextVal = (nextVoiced.f && nextVoiced.f[idx]) || 0;
-          try {
-            voiceFilters[idx].frequency.setValueAtTime(curVal, t);
-            voiceFilters[idx].frequency.setValueAtTime(curVal, morphStart);
-            voiceFilters[idx].frequency.linearRampToValueAtTime(nextVal, morphEnd);
-          } catch (e) {}
-          try {
-            sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, t);
-            sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, morphStart);
-            sharedNoiseFilters[idx].frequency.linearRampToValueAtTime(nextVal, morphEnd);
-          } catch (e) {}
+            try {
+              voiceFilters[idx].frequency.cancelScheduledValues(t);
+              voiceFilters[idx].frequency.setValueAtTime(curVal, t);
+              voiceFilters[idx].frequency.setValueAtTime(curVal, morphStart);
+              voiceFilters[idx].frequency.linearRampToValueAtTime(nextVal, morphEnd);
+            } catch (e) {}
+            try {
+              sharedNoiseFilters[idx].frequency.cancelScheduledValues(t);
+              sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, t);
+              sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, morphStart);
+              sharedNoiseFilters[idx].frequency.linearRampToValueAtTime(nextVal, morphEnd);
+            } catch (e) {}
+
         }
       } else {
         // no voiced target (or morph disabled) -> set filters to current f immediately
@@ -964,10 +967,15 @@
   };
 
   // UI: minimal container (controls same as previous iterations)
+  // Enable page scrolling
+  document.body.style.margin = "0";
+  document.body.style.padding = "8px";
+  document.body.style.overflow = "auto";
+
   document.querySelectorAll(".voice-ui").forEach(e => e.remove());
   const container = document.createElement("div");
   container.className = "voice-ui";
-  container.style = "position:fixed;top:20px;left:20px;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;z-index:9999;max-width:720px;";
+  container.style = "margin:0 auto;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;max-width:900px;box-sizing:border-box;";
   container.innerHTML = `
     <h3 style="margin:0 0 8px 0">HOSTERS FR SYNTHESIZER</h3>
     <div style="font-size:12px;margin-bottom:8px">HOSTERS VERY HUMAN SYNTHESIZER</div>
@@ -1046,6 +1054,22 @@
       <div style="font-size:12px; margin-top:6px; color:#444">Notes map to phoneme <b>a</b>. Gaps map to <b>rest</b>. Enable the toggle to keep current phonemes but replace their <code><pitch,duration></code>.</div>
     </div>
     <div id="outputControls" style="margin-top:8px"></div>
+    <!-- Piano Roll Section -->
+    <div style="margin-top:12px; padding-top:8px; border-top:1px dashed #ddd;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+        <span style="font-size:12px; font-weight:bold;">Piano Roll</span>
+        <div style="font-size:11px;">
+          <label><input type="checkbox" id="pianoRollSnap" checked/> Snap to grid</label>
+          <button id="pianoRollRefreshBtn" style="margin-left:6px; padding:2px 6px; font-size:11px;">Refresh from text</button>
+        </div>
+      </div>
+      <div id="pianoRollContainer" style="position:relative; border:1px solid #999; overflow:auto; width:100%; height:350px; background:#f8f8f8;">
+        <canvas id="pianoRollCanvas" style="display:block;"></canvas>
+      </div>
+      <div style="font-size:11px; margin-top:4px; color:#555;">
+        Click grid to add note | Drag note to move | Drag edges to resize | Delete key removes selected | Double-click to edit phoneme
+      </div>
+    </div>
   `;
   document.body.appendChild(container);
 
@@ -1495,4 +1519,514 @@
       statusEl.textContent = "Error: " + (err.message || err);
     }
   };
+
+  // ======== PIANO ROLL IMPLEMENTATION ========
+  const pianoRollContainer = container.querySelector("#pianoRollContainer");
+  const pianoRollCanvas = container.querySelector("#pianoRollCanvas");
+  const ctx = pianoRollCanvas.getContext("2d");
+  const pianoRollRefreshBtn = container.querySelector("#pianoRollRefreshBtn");
+  const pianoRollSnap = container.querySelector("#pianoRollSnap");
+
+  // Piano roll constants
+  const KEYBOARD_WIDTH = 50;
+  const NOTE_HEIGHT = 14;
+  const PIXELS_PER_BEAT = 120;
+  const MIN_NOTE_DURATION_PX = 8;
+  const NOTE_RADIUS = 4;
+
+  // Note names for display (C0-based for internal, but we show C2-C6)
+  const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+  // Piano roll state
+  let pianoRollNotes = []; // { phoneme, pitchName, midiNote, startBeat, durBeats, startPx, durPx }
+  let selectedNoteIndex = -1;
+  let dragState = null; // { type: 'move'|'resizeLeft'|'resizeRight', noteIdx, startX, startY, origStartBeat, origDurBeats, origPitch }
+  let hoveredEdge = null; // { noteIdx, side: 'left'|'right' }
+
+  // Parse the text input and build piano roll notes
+  function parsePianoRollFromText(text, bpm, gridType, stepsPerBeat) {
+    const beatLen = 60 / bpm;
+    const regex = /([a-zA-Z']+)\s*<\s*([\w#b]+)\s*,\s*([\d.]+)/gi;
+    const notes = [];
+    let match;
+    let startBeat = 0;
+    while ((match = regex.exec(text)) !== null) {
+      const phoneme = match[1].toLowerCase();
+      const pitchRaw = match[2];
+      const units = parseFloat(match[3]);
+
+      let durSec = 0;
+      if (gridType === "beats") durSec = units * beatLen;
+      else if (gridType === "steps") durSec = (units / stepsPerBeat) * beatLen;
+      else if (gridType === "seconds") durSec = units;
+      else durSec = units * beatLen;
+
+      const durBeats = durSec / beatLen;
+      const midiNote = pitchNameToMidi(pitchRaw);
+
+      if (phoneme !== "rest" && midiNote !== null) {
+        notes.push({
+          phoneme,
+          pitchName: pitchRaw,
+          midiNote,
+          startBeat,
+          durBeats
+        });
+      }
+      startBeat += durBeats;
+    }
+    return notes;
+  }
+
+  // Convert pitch name like "C4", "D#3" to MIDI note number
+  function pitchNameToMidi(name) {
+    const m = /^([A-Ga-g])([#b]?)(\d)$/.exec(name);
+    if (!m) return null;
+    const [, base, acc, oct] = m;
+    const semitoneOffsets = { C:0,"C#":1,Db:1,D:2,"D#":3,Eb:3,E:4,F:5,"F#":6,Gb:6,G:7,"G#":8,Ab:8,A:9,"A#":10,Bb:10,B:11 };
+    const key = base.toUpperCase() + acc;
+    const semi = semitoneOffsets[key];
+    if (semi === undefined) return null;
+    return (parseInt(oct) + 1) * 12 + semi; // MIDI note numbers: C0=12, C1=24, etc.
+  }
+
+  function midiToNoteName(midi) {
+    const oct = Math.floor(midi / 12) - 1;
+    const name = NOTE_NAMES[midi % 12];
+    return `${name}${oct}`;
+  }
+
+  // Get the range of MIDI notes to display
+  function getMidiRange(notes) {
+    if (notes.length === 0) return { min: 48, max: 84 }; // C2 to C5
+    let min = 127, max = 0;
+    for (const n of notes) {
+      if (n.midiNote < min) min = n.midiNote;
+      if (n.midiNote > max) max = n.midiNote;
+    }
+    min = Math.max(0, min - 4);
+    max = Math.min(127, max + 4);
+    if (max - min < 24) { max = min + 24; }
+    return { min, max };
+  }
+
+  // Get total beats from notes
+  function getTotalBeats(notes) {
+    let max = 4;
+    for (const n of notes) {
+      const end = n.startBeat + n.durBeats;
+      if (end > max) max = end;
+    }
+    return max + 2;
+  }
+
+  // Snap a value to grid
+  function snapToGrid(val, gridSize) {
+    return Math.round(val / gridSize) * gridSize;
+  }
+
+  function drawPianoRoll() {
+    const text = container.querySelector("#phonemeInput").value;
+    const bpm = parseFloat(container.querySelector("#bpm").value) || 120;
+    const gridType = container.querySelector("#gridType").value || "beats";
+    const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
+    const beatLen = 60 / bpm;
+
+    pianoRollNotes = parsePianoRollFromText(text, bpm, gridType, stepsPerBeat);
+    const range = getMidiRange(pianoRollNotes);
+    const totalBeats = getTotalBeats(pianoRollNotes);
+
+    const numKeys = range.max - range.min + 1;
+    const canvasWidth = KEYBOARD_WIDTH + totalBeats * PIXELS_PER_BEAT + 20;
+    const canvasHeight = numKeys * NOTE_HEIGHT + 10;
+
+    pianoRollCanvas.width = canvasWidth;
+    pianoRollCanvas.height = canvasHeight;
+    pianoRollContainer.style.width = "100%";
+
+    const c = ctx;
+
+    // Background
+    c.fillStyle = "#f8f8f8";
+    c.fillRect(0, 0, canvasWidth, canvasHeight);
+
+    // Draw piano keys
+    for (let i = 0; i < numKeys; i++) {
+      const midiNote = range.max - i;
+      const y = i * NOTE_HEIGHT + 5;
+      const isWhite = [0,2,4,5,7,9,11].includes(midiNote % 12);
+
+      if (isWhite) {
+        c.fillStyle = "#fff";
+        c.fillRect(0, y, KEYBOARD_WIDTH, NOTE_HEIGHT - 1);
+        c.strokeStyle = "#ccc";
+        c.strokeRect(0, y, KEYBOARD_WIDTH, NOTE_HEIGHT - 1);
+      } else {
+        c.fillStyle = "#333";
+        c.fillRect(0, y, KEYBOARD_WIDTH * 0.65, NOTE_HEIGHT - 1);
+      }
+
+      // Note name labels on C notes
+      if (midiNote % 12 === 0) {
+        c.fillStyle = "#666";
+        c.font = "9px monospace";
+        c.fillText(midiToNoteName(midiNote), 2, y + 10);
+      }
+    }
+
+    // Draw grid lines
+    const snapResolution = gridType === "steps" ? 1.0 / stepsPerBeat : 1.0;
+    const gridPx = snapResolution * PIXELS_PER_BEAT;
+
+    for (let beat = 0; beat <= totalBeats; beat += snapResolution) {
+      const x = KEYBOARD_WIDTH + beat * PIXELS_PER_BEAT;
+      c.strokeStyle = beat % 1 === 0 ? "rgba(0,0,0,0.15)" : "rgba(0,0,0,0.06)";
+      c.lineWidth = beat % 1 === 0 ? 1 : 0.5;
+      c.beginPath();
+      c.moveTo(x, 0);
+      c.lineTo(x, canvasHeight);
+      c.stroke();
+
+      // Beat numbers
+      if (beat % 1 === 0) {
+        c.fillStyle = "#999";
+        c.font = "9px monospace";
+        c.fillText(`${beat+1}`, x + 3, 10);
+      }
+    }
+
+    // Draw notes
+    for (let idx = 0; idx < pianoRollNotes.length; idx++) {
+      const note = pianoRollNotes[idx];
+      const keyIndex = range.max - note.midiNote;
+      const x = KEYBOARD_WIDTH + note.startBeat * PIXELS_PER_BEAT;
+      const y = keyIndex * NOTE_HEIGHT + 5;
+      const w = Math.max(MIN_NOTE_DURATION_PX, note.durBeats * PIXELS_PER_BEAT);
+      const h = NOTE_HEIGHT - 2;
+
+      // Store pixel positions for hit-testing
+      note.startPx = x;
+      note.durPx = w;
+
+      const isSelected = idx === selectedNoteIndex;
+
+      // Note color based on phoneme type
+      const phonType = getPhonemeType(note.phoneme);
+      let color;
+      switch (phonType) {
+        case "vowel": color = isSelected ? "#4a90d9" : "#6db3f2"; break;
+        case "consonant": color = isSelected ? "#d97a4a" : "#f2a56d"; break;
+        case "nasal": color = isSelected ? "#7a4ad9" : "#a56df2"; break;
+        default: color = isSelected ? "#888" : "#aaa";
+      }
+
+      // Rounded rectangle
+      c.fillStyle = color;
+      c.beginPath();
+      c.moveTo(x + NOTE_RADIUS, y);
+      c.lineTo(x + w - NOTE_RADIUS, y);
+      c.quadraticCurveTo(x + w, y, x + w, y + NOTE_RADIUS);
+      c.lineTo(x + w, y + h - NOTE_RADIUS);
+      c.quadraticCurveTo(x + w, y + h, x + w - NOTE_RADIUS, y + h);
+      c.lineTo(x + NOTE_RADIUS, y + h);
+      c.quadraticCurveTo(x, y + h, x, y + h - NOTE_RADIUS);
+      c.lineTo(x, y + NOTE_RADIUS);
+      c.quadraticCurveTo(x, y, x + NOTE_RADIUS, y);
+      c.closePath();
+      c.fill();
+
+      // Border for selected
+      if (isSelected) {
+        c.strokeStyle = "#ff0";
+        c.lineWidth = 2;
+        c.stroke();
+      }
+
+      // Phoneme label
+      c.fillStyle = "#fff";
+      c.font = "10px monospace";
+      c.fillText(note.phoneme, x + 4, y + 10);
+    }
+
+    // Edge hover indicators
+    if (hoveredEdge) {
+      const note = pianoRollNotes[hoveredEdge.noteIdx];
+      if (note) {
+        const keyIndex = range.max - note.midiNote;
+        const y = keyIndex * NOTE_HEIGHT + 5;
+        const h = NOTE_HEIGHT - 2;
+        if (hoveredEdge.side === "left") {
+          c.fillStyle = "rgba(255,255,0,0.4)";
+          c.fillRect(note.startPx - 3, y, 6, h);
+        } else {
+          const rightX = note.startPx + note.durPx;
+          c.fillStyle = "rgba(255,255,0,0.4)";
+          c.fillRect(rightX - 3, y, 6, h);
+        }
+      }
+    }
+  }
+
+  // Get phoneme type for coloring
+  function getPhonemeType(phon) {
+    const vowels = ["a","aa","e","i","ee","I","o","u","y","w","r","l","uh","er","oy","aw"];
+    const nasals = ["m","n","ng"];
+    if (vowels.includes(phon)) return "vowel";
+    if (nasals.includes(phon)) return "nasal";
+    return "consonant";
+  }
+
+  // Update text input from piano roll notes
+  function updateTextFromPianoRoll() {
+    const gridType = container.querySelector("#gridType").value || "beats";
+    const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
+    const bpm = parseFloat(container.querySelector("#bpm").value) || 120;
+    const beatLen = 60 / bpm;
+
+    let tokens = [];
+    let prevEndBeat = 0;
+    for (const note of pianoRollNotes) {
+      // Add rest if gap
+      if (note.startBeat > prevEndBeat + 0.01) {
+        const gap = note.startBeat - prevEndBeat;
+        let gapUnits = gap;
+        if (gridType === "steps") gapUnits = gap * stepsPerBeat;
+        tokens.push(`rest <C4,${gapUnits.toFixed(3)}>`);
+      }
+
+      let units = note.durBeats;
+      if (gridType === "steps") units = note.durBeats * stepsPerBeat;
+      tokens.push(`${note.phoneme} <${note.pitchName},${units.toFixed(3)}>`);
+      prevEndBeat = note.startBeat + note.durBeats;
+    }
+
+    container.querySelector("#phonemeInput").value = tokens.join(" ");
+  }
+
+  // Hit test: find note at canvas coordinates
+  function hitTestNotes(mouseX, mouseY) {
+    const range = getMidiRange(pianoRollNotes);
+    for (let i = pianoRollNotes.length - 1; i >= 0; i--) {
+      const n = pianoRollNotes[i];
+      const keyIndex = range.max - n.midiNote;
+      const y = keyIndex * NOTE_HEIGHT + 5;
+      const h = NOTE_HEIGHT - 2;
+      const x = n.startPx;
+      const w = n.durPx;
+
+      // Check edge regions (left/right 5px)
+      if (mouseY >= y && mouseY <= y + h) {
+        if (mouseX >= x - 3 && mouseX <= x + 5) {
+          return { noteIdx: i, action: "resizeLeft" };
+        }
+        if (mouseX >= x + w - 5 && mouseX <= x + w + 3) {
+          return { noteIdx: i, action: "resizeRight" };
+        }
+        if (mouseX >= x && mouseX <= x + w) {
+          return { noteIdx: i, action: "move" };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Find the grid position from mouse coordinates
+  function mouseToGrid(mouseX, mouseY) {
+    const range = getMidiRange(pianoRollNotes);
+    const x = mouseX - KEYBOARD_WIDTH;
+    let beat = x / PIXELS_PER_BEAT;
+    const gridType = container.querySelector("#gridType").value || "beats";
+    const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
+    const snapResolution = gridType === "steps" ? 1.0 / stepsPerBeat : 0.25;
+
+    if (pianoRollSnap.checked) {
+      beat = snapToGrid(beat, snapResolution);
+    }
+    beat = Math.max(0, beat);
+
+    const keyIndex = Math.round((mouseY - 5) / NOTE_HEIGHT);
+    let midiNote = range.max - keyIndex;
+    midiNote = Math.max(0, Math.min(127, midiNote));
+
+    return { beat, midiNote, pitchName: midiToNoteName(midiNote) };
+  }
+
+  // Mouse events
+  pianoRollCanvas.addEventListener("mousedown", (e) => {
+    const rect = pianoRollCanvas.getBoundingClientRect();
+    const scaleX = pianoRollCanvas.width / rect.width;
+    const scaleY = pianoRollCanvas.height / rect.height;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+
+    const hit = hitTestNotes(mouseX, mouseY);
+    if (hit) {
+      selectedNoteIndex = hit.noteIdx;
+      const note = pianoRollNotes[hit.noteIdx];
+      dragState = {
+        type: hit.action,
+        noteIdx: hit.noteIdx,
+        startX: mouseX,
+        startY: mouseY,
+        origStartBeat: note.startBeat,
+        origDurBeats: note.durBeats,
+        origMidi: note.midiNote
+      };
+      drawPianoRoll();
+      return;
+    }
+
+    // Click on empty space: add a new note
+    selectedNoteIndex = -1;
+    const grid = mouseToGrid(mouseX, mouseY);
+    if (mouseX > KEYBOARD_WIDTH) {
+      const newNote = {
+        phoneme: "a",
+        pitchName: grid.pitchName,
+        midiNote: grid.midiNote,
+        startBeat: grid.beat,
+        durBeats: 1.0
+      };
+      pianoRollNotes.push(newNote);
+      pianoRollNotes.sort((a, b) => a.startBeat - b.startBeat || a.midiNote - b.midiNote);
+      selectedNoteIndex = pianoRollNotes.indexOf(newNote);
+      updateTextFromPianoRoll();
+      drawPianoRoll();
+    }
+  });
+
+  pianoRollCanvas.addEventListener("mousemove", (e) => {
+    const rect = pianoRollCanvas.getBoundingClientRect();
+    const scaleX = pianoRollCanvas.width / rect.width;
+    const scaleY = pianoRollCanvas.height / rect.height;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+
+    // Edge hover detection
+    const hit = hitTestNotes(mouseX, mouseY);
+    if (hit && (hit.action === "resizeLeft" || hit.action === "resizeRight")) {
+      pianoRollCanvas.style.cursor = "ew-resize";
+      hoveredEdge = { noteIdx: hit.noteIdx, side: hit.action === "resizeLeft" ? "left" : "right" };
+      drawPianoRoll();
+    } else if (hit && hit.action === "move") {
+      pianoRollCanvas.style.cursor = "grab";
+      hoveredEdge = null;
+      drawPianoRoll();
+    } else {
+      pianoRollCanvas.style.cursor = "crosshair";
+      if (hoveredEdge) {
+        hoveredEdge = null;
+        drawPianoRoll();
+      }
+    }
+
+    // Drag handling
+    if (dragState) {
+      const note = pianoRollNotes[dragState.noteIdx];
+      if (!note) return;
+
+      const dxBeats = (mouseX - dragState.startX) / PIXELS_PER_BEAT;
+      const gridType = container.querySelector("#gridType").value || "beats";
+      const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
+      const snapResolution = gridType === "steps" ? 1.0 / stepsPerBeat : 0.25;
+
+      if (dragState.type === "move") {
+        let newStart = dragState.origStartBeat + dxBeats;
+        if (pianoRollSnap.checked) newStart = snapToGrid(newStart, snapResolution);
+        newStart = Math.max(0, newStart);
+        note.startBeat = newStart;
+
+        // Change pitch based on vertical drag
+        const dyKeys = Math.round((mouseY - dragState.startY) / NOTE_HEIGHT);
+        let newMidi = dragState.origMidi - dyKeys;
+        newMidi = Math.max(0, Math.min(127, newMidi));
+        note.midiNote = newMidi;
+        note.pitchName = midiToNoteName(newMidi);
+      } else if (dragState.type === "resizeRight") {
+        let newDur = dragState.origDurBeats + dxBeats;
+        if (pianoRollSnap.checked) newDur = snapToGrid(newDur, snapResolution);
+        newDur = Math.max(0.125, newDur);
+        note.durBeats = newDur;
+      } else if (dragState.type === "resizeLeft") {
+        let newStart = dragState.origStartBeat + dxBeats;
+        let newDur = dragState.origDurBeats - dxBeats;
+        if (pianoRollSnap.checked) {
+          const snapped = snapToGrid(newDur, snapResolution);
+          newDur = snapped;
+          newStart = dragState.origStartBeat + (dragState.origDurBeats - snapped);
+        }
+        newStart = Math.max(0, newStart);
+        newDur = Math.max(0.125, newDur);
+        note.startBeat = newStart;
+        note.durBeats = newDur;
+      }
+
+      updateTextFromPianoRoll();
+      drawPianoRoll();
+    }
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (dragState) {
+      dragState = null;
+      drawPianoRoll();
+    }
+  });
+
+  // Double-click to edit phoneme
+  pianoRollCanvas.addEventListener("dblclick", (e) => {
+    const rect = pianoRollCanvas.getBoundingClientRect();
+    const scaleX = pianoRollCanvas.width / rect.width;
+    const scaleY = pianoRollCanvas.height / rect.height;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+
+    const hit = hitTestNotes(mouseX, mouseY);
+    if (hit && pianoRollNotes[hit.noteIdx]) {
+      const note = pianoRollNotes[hit.noteIdx];
+      const newPhoneme = prompt("Enter phoneme:", note.phoneme);
+      if (newPhoneme && newPhoneme.trim()) {
+        note.phoneme = newPhoneme.trim().toLowerCase();
+        updateTextFromPianoRoll();
+        drawPianoRoll();
+      }
+    }
+  });
+
+  // Delete key to remove selected note
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Delete" || e.key === "Backspace") {
+      // Only if piano roll is visible and focused
+      if (document.activeElement === pianoRollCanvas || document.activeElement === pianoRollContainer) {
+        e.preventDefault();
+        if (selectedNoteIndex >= 0 && selectedNoteIndex < pianoRollNotes.length) {
+          pianoRollNotes.splice(selectedNoteIndex, 1);
+          selectedNoteIndex = -1;
+          updateTextFromPianoRoll();
+          drawPianoRoll();
+        }
+      }
+    }
+  });
+
+  // Refresh from text input
+  pianoRollRefreshBtn.addEventListener("click", () => {
+    selectedNoteIndex = -1;
+    drawPianoRoll();
+  });
+
+  // Auto-refresh when text input changes
+  container.querySelector("#phonemeInput").addEventListener("input", () => {
+    selectedNoteIndex = -1;
+    drawPianoRoll();
+  });
+
+  // Refresh piano roll when BPM or grid changes
+  container.querySelector("#bpm").addEventListener("change", drawPianoRoll);
+  container.querySelector("#gridType").addEventListener("change", drawPianoRoll);
+  container.querySelector("#stepsPerBeat").addEventListener("change", drawPianoRoll);
+
+  // Initial draw
+  drawPianoRoll();
+
 })();
