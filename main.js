@@ -12,6 +12,27 @@
   let dynamicMode = false;
   let consonantDuration = 0.1;
 
+  // preview playback state (shared so re-synthesizing stops any playing preview)
+  let actx = null;
+  let prevSrc = null;
+  let previewBuf = null;
+
+  const stopPreview = () => {
+    if (prevSrc) {
+      try {
+        prevSrc.onended = null;
+        prevSrc.disconnect();
+        prevSrc.stop();
+      } catch (e) {}
+      prevSrc = null;
+    }
+    previewBuf = null;
+    if (actx) {
+      try { if (actx.state === "running") actx.close(); } catch (e) {}
+      actx = null;
+    }
+  };
+
   // personal dictionary persistence functions
   function savePersonalDict() {
     try {
@@ -128,28 +149,36 @@
     s: { f: [2950, 4950, 3450], breathy: true, amp: 1.4, voiced: false, noiseAmp: 1 },
     z: { f: [2950, 4450, 4950], breathy: true, amp: 1.4, voiced: true, noiseAmp: 1 },
     t: { f: [950, 4450, 2950], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
-    d: { f: [585, 3560, 1705], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: .5, morphs: false },
+    d: { f: [355, 3160, 1605], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: .15, morphs: false },
     k: { f: [1150, 1950, 3150], burst: true, short: true, voiced: false, noiseAmp: 1 },
-    g: { f: [850, 1650, 2650], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 1 },
+    g: { f: [850, 1650, 2650], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.3, morphs: false },
 
     // nasals: flagged nasal: true
     n: { f: [250, 1250, 2450], voiced: true, nasal: true, noiseAmp: 1 },
     m: { f: [200, 1050, 2050], voiced: true, nasal: true, noiseAmp: 1 },
-    b: { f: [305, 1100, 2050], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 1, morphs: true },
+    b: { f: [305, 1100, 2050], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
     p: { f: [950, 1750, 2650], burst: true, short: true, voiced: false, noiseAmp: 1 },
     f: { f: [1150, 2950, 4950], breathy: true, voiced: false, noiseAmp: 1 },
-    v: { f: [1150, 2750, 4750], breathy: true, voiced: true, noiseAmp: 1 },
+    v: { f: [255, 2100, 3255], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
     th: { f: [1150, 2150, 3450], breathy: true, voiced: false, noiseAmp: 1 },
-    sh: { f: [2450, 3450, 4950], breathy: true, voiced: false, noiseAmp: 1 },
+    sh: { f: [2450, 3050, 3950], breathy: true, voiced: false, noiseAmp: 1 },
     ch: { f: [1950, 2950, 4450], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
     uh: { f: [640, 945, 2550], voiced: true },
 
     // added phones / fallbacks
-    er: { f: [550, 1200, 2450], voiced: true },
+    er: { f: [550, 1200, 2450], morphTo: [450, 1300, 1700], voiced: true },
     j: { f: [450, 1550, 2550], voiced: true },
     ng: { f: [200, 850, 1950], voiced: true, nasal: true },
-    oy: { f: [400, 850, 2550], voiced: true },
-    aw: { f: [650, 1250, 2550], voiced: true },
+    oy: { f: [600, 850, 2550], morphTo: [350, 2200, 2900], voiced: true },
+    ow: { f: [600, 1000, 2600], morphTo: [400, 1000, 2600], voiced: true },
+    ou: { f: [400, 1000, 2600], morphTo: [325, 700, 2530], voiced: true },
+    ay: { f: [650, 1250, 2550], morphTo: [350, 2200, 2900], voiced: true },
+    aw: { f: [650, 1250, 2550], morphTo: [400, 1000, 2600], voiced: true },
+    ew: { f: [300, 2000, 2800], morphTo: [325, 700, 2530], voiced: true },
+    ey: { f: [500, 2300, 3000], morphTo: [300, 2000, 2800], voiced: true },
+    uw: { f: [325, 700, 2530], morphTo: [325, 700, 2530], voiced: true },
+    iw: { f: [300, 2000, 2800], morphTo: [325, 700, 2530], voiced: true },
+    il: { f: [300, 2000, 2800], morphTo: [500, 820, 2400], voiced: true },
     rest: { f: [0, 0, 0], voiced: false, burst: false, short: false, breathy: false }
   };
 
@@ -293,24 +322,59 @@
   // Token formats:
   // phon <NOTE,duration>
   // phon <NOTE,duration,vibFreqHz,vibDelayBeats,vibFadeInBeats,vibSpeedBeats>
-  // Phoneme vibrato fields:
-  // - vibDelay, vibFadeIn, vibSpeed are in BEATS-based units (user spec says beats-per-sec).
+  // [settings] phon <NOTE,duration>  (brackets optional, applied to this phoneme only)
+  //   fs   = formant scale (e.g. 0.5 male, 1.5 female)
+  //   vd   = vibrato depth (Hz)
+  //   vf   = vibrato frequency (Hz)
+  //   vde  = vibrato delay (seconds)
+  //   vfa  = vibrato fade-in (seconds)
+  //   vfao = vibrato fade-out (seconds)
+  // Phoneme vibrato fields inside <>:
+  // - vibDelay, vibFadeIn are in BEATS-based units; vibSpeed overrides vibrato rate.
   // - NOTE is a pitch name (e.g. C#4) and duration is in units per gridType.
-    const regex = /([a-zA-Z']+)\s*<\s*([\w#b]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?\s*>/gi;
+  const parseBracketSettings = (s) => {
+    const out = {};
+    if (!s) return out;
+    const re = /\b(fs|vd|vf|vde|vfa|vfao)\s*:\s*([\d.]+)\b/gi;
+    let m;
+    while ((m = re.exec(s)) !== null) out[m[1].toLowerCase()] = parseFloat(m[2]);
+    return out;
+  };
+  // Apply per-phoneme vibrato overrides from [settings] brackets and <...> extra
+  // fields. Only fields that are explicitly provided are stored on the phoneme;
+  // anything else falls back to the global vibrato settings at synthesis time.
+  const applyPerNoteVibrato = (p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats) => {
+    if (vibFreqHz !== null && Number.isFinite(vibFreqHz)) p.vibFreq = vibFreqHz;
+    if (vibSpeedBeats !== null && Number.isFinite(vibSpeedBeats)) p.vibFreq = vibSpeedBeats;
+    if (vibDelayBeats !== null && Number.isFinite(vibDelayBeats)) p.vibDelay = vibDelayBeats * beatLen;
+    if (vibFadeInBeats !== null && Number.isFinite(vibFadeInBeats)) p.vibFadeIn = vibFadeInBeats * beatLen;
+    if (bracket.fs) {
+      p.f = p.f.map(x => x * bracket.fs);
+      if (p.morphTo) p.morphTo = p.morphTo.map(x => x * bracket.fs);
+    }
+    if (bracket.vf !== undefined) p.vibFreq = bracket.vf;
+    if (bracket.vd !== undefined) p.vibDepth = bracket.vd;
+    if (bracket.vde !== undefined) p.vibDelay = bracket.vde;
+    if (bracket.vfa !== undefined) p.vibFadeIn = bracket.vfa;
+    if (bracket.vfao !== undefined) p.vibFadeOut = bracket.vfao;
+  };
+
+    const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([\w#b]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?\s*>/gi;
     const result = [];
     let match;
     while ((match = regex.exec(text)) !== null) {
-      const tokenRaw = match[1];
+      const bracket = parseBracketSettings(match[1] || "");
+      const tokenRaw = match[2];
       const token = tokenRaw.toLowerCase();
-      const pitchRaw = match[2];
-      const units = parseFloat(match[3]);
+      const pitchRaw = match[3];
+      const units = parseFloat(match[4]);
 
       // Optional per-phoneme vibrato fields (beats-based):
-      // match[4]=vibFreqHz, match[5]=vibDelayBeats, match[6]=vibFadeInBeats, match[7]=vibSpeedBeats
-      const vibFreqHz = match[4] != null ? parseFloat(match[4]) : null;
-      const vibDelayBeats = match[5] != null ? parseFloat(match[5]) : null;
-      const vibFadeInBeats = match[6] != null ? parseFloat(match[6]) : null;
-      const vibSpeedBeats = match[7] != null ? parseFloat(match[7]) : null;
+      // match[5]=vibFreqHz, match[6]=vibDelayBeats, match[7]=vibFadeInBeats, match[8]=vibSpeedBeats
+      const vibFreqHz = match[5] != null ? parseFloat(match[5]) : null;
+      const vibDelayBeats = match[6] != null ? parseFloat(match[6]) : null;
+      const vibFadeInBeats = match[7] != null ? parseFloat(match[7]) : null;
+      const vibSpeedBeats = match[8] != null ? parseFloat(match[8]) : null;
 
       // compute duration from units based on grid type
       let dur = 0;
@@ -323,20 +387,9 @@
       if (phonemeMap[token]) {
         let p = { key: token, ...phonemeMap[token], d: dur, pitch: noteToFreq(pitchRaw) };
         p.f = getAdjustedFormants(p.f);
+        if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
-        // Per-phoneme vibrato: vibFreqHz is optional (if null/NaN => fallback to global vibFreq)
-        // vibDelay/ vFadeIn/ vibSpeed are in BEATS (converted to seconds using beatLen).
-        // Input rule: vibFreqHz === 0 counts as provided input, so we only fallback when vibFreqHz is null/NaN.
-        const vibProvided = vibFreqHz !== null && Number.isFinite(vibFreqHz);
-        p.vibFreq = vibProvided ? vibFreqHz : vibFreq;
-        p.vibDelay = vibDelayBeats != null && Number.isFinite(vibDelayBeats) ? vibDelayBeats * beatLen : vibDelay;
-        p.vibFadeIn = vibFadeInBeats != null && Number.isFinite(vibFadeInBeats) ? vibFadeInBeats * beatLen : 0;
-        p.vibSpeed = vibSpeedBeats != null && Number.isFinite(vibSpeedBeats) ? vibSpeedBeats : null;
-
-        // Back-compat: if vibSpeed is provided we map it to vibFreq as an override.
-        if (p.vibSpeed !== null && Number.isFinite(p.vibSpeed)) {
-          p.vibFreq = p.vibSpeed;
-        }
+        applyPerNoteVibrato(p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
 
         result.push(p);
         continue;
@@ -351,16 +404,9 @@
         if (phonemeMap[key]) {
           let p = { key, ...phonemeMap[key], d: partDur, pitch: noteToFreq(pitchRaw) };
           p.f = getAdjustedFormants(p.f);
+          if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
-          // Per-phoneme vibrato fields (propagate from original token)
-          const vibProvided = vibFreqHz !== null && Number.isFinite(vibFreqHz);
-          p.vibFreq = vibProvided ? vibFreqHz : vibFreq;
-          p.vibDelay = vibDelayBeats != null && Number.isFinite(vibDelayBeats) ? vibDelayBeats * beatLen : vibDelay;
-          p.vibFadeIn = vibFadeInBeats != null && Number.isFinite(vibFadeInBeats) ? vibFadeInBeats * beatLen : 0;
-          p.vibSpeed = vibSpeedBeats != null && Number.isFinite(vibSpeedBeats) ? vibSpeedBeats : null;
-          if (p.vibSpeed !== null && Number.isFinite(p.vibSpeed)) {
-            p.vibFreq = p.vibSpeed;
-          }
+          applyPerNoteVibrato(p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
 
           result.push(p);
         } else {
@@ -373,16 +419,9 @@
           const fm = (fallbackMap[key] || "rest");
           let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch: noteToFreq(pitchRaw) };
           p.f = getAdjustedFormants(p.f);
+          if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
-          // Per-phoneme vibrato fields (propagate from original token)
-          const vibProvided = vibFreqHz !== null && Number.isFinite(vibFreqHz);
-          p.vibFreq = vibProvided ? vibFreqHz : vibFreq;
-          p.vibDelay = vibDelayBeats != null && Number.isFinite(vibDelayBeats) ? vibDelayBeats * beatLen : vibDelay;
-          p.vibFadeIn = vibFadeInBeats != null && Number.isFinite(vibFadeInBeats) ? vibFadeInBeats * beatLen : 0;
-          p.vibSpeed = vibSpeedBeats != null && Number.isFinite(vibSpeedBeats) ? vibSpeedBeats : null;
-          if (p.vibSpeed !== null && Number.isFinite(p.vibSpeed)) {
-            p.vibFreq = p.vibSpeed;
-          }
+          applyPerNoteVibrato(p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
 
           result.push(p);
         }
@@ -433,6 +472,80 @@
     return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
   };
 
+  // Rosenberg (1971) glottal pulse model.
+  // Builds one period of the classic glottal FLOW waveform:
+  //   - Open phase:    u(x) = 3x^2 - 2x^3, x = t/(OQ*T)   (0 -> 1, zero slope at both ends)
+  //   - Return phase:  fast exponential decay back to zero (LF-style closure)
+  //   - Closed phase:  u = 0
+  // The glottal flow DERIVATIVE (the standard voiced excitation in formant
+  // synthesis, e.g. Klatt's KLGLOTT88) is obtained by numeric differentiation
+  // and then decomposed via DFT into real/imag coefficients so the pulse keeps
+  // the correct phase relationships between harmonics (a real glottal source has
+  // roughly -12 dB/octave roll-off plus a characteristic phase dispersion that a
+  // naive 1/n^2 cosine series cannot reproduce).
+  const createRosenbergGlottalWave = (ctx, numHarmonics = 27, openQuotient = 0.55, returnQuotient = 0.2) => {
+    const N = 1024; // samples per period for the numeric pulse
+    const u = new Float64Array(N);
+
+    // Clamp open quotient to a sane vocal range and keep the return phase from
+    // overlapping the next period.
+    const OQ = Math.min(0.95, Math.max(0.1, openQuotient));
+    const RQ = Math.min(0.4, Math.max(0.02, returnQuotient));
+    const Topen = Math.max(1, Math.round(N * OQ));
+    const Tret = Math.max(1, Math.round(N * Math.min(RQ, 1 - OQ)));
+    const Tclose = N - Topen - Tret;
+
+    // 1) Build one period of the glottal flow.
+    for (let n = 0; n < Topen; n++) {
+      const x = n / Math.max(1, Topen - 1);
+      u[n] = 3 * x * x - 2 * x * x * x; // Rosenberg open phase: 0 -> 1
+    }
+    for (let n = 0; n < Tret; n++) {
+      const a = n / Math.max(1, Tret - 1); // 0..1 across the return phase
+      u[Topen + n] = Math.exp(-6 * a);      // fast exponential return to ~0.25%
+    }
+    // Closed phase is zero by default (u array initialized to 0).
+
+    // 2) Glottal flow derivative via backward difference.
+    const d = new Float64Array(N);
+    let maxAbs = 0;
+    for (let n = 1; n < N; n++) {
+      d[n] = u[n] - u[n - 1];
+      if (Math.abs(d[n]) > maxAbs) maxAbs = Math.abs(d[n]);
+    }
+    d[0] = d[N - 1]; // wrap for periodicity
+    if (maxAbs > 0) for (let n = 0; n < N; n++) d[n] /= maxAbs;
+
+    // 3) DFT to harmonic real/imag coefficients (amplitude roughly ~1/n roll-off
+    //    for the derivative, but with the correct phase relationships of a real
+    //    glottal pulse).
+    const nH = Math.max(1, numHarmonics | 0);
+    const real = new Float32Array(nH);
+    const imag = new Float32Array(nH);
+    const scale = 2 / N;
+    for (let k = 1; k < nH; k++) {
+      let re = 0, im = 0;
+      for (let n = 0; n < N; n++) {
+        const ph = 2 * Math.PI * k * n / N;
+        re += d[n] * Math.cos(ph);
+        im += d[n] * Math.sin(ph);
+      }
+      real[k] = re * scale;
+      imag[k] = im * scale;
+    }
+
+    // Normalize against the fundamental so output level is consistent regardless
+    // of open quotient, then strip DC.
+    const f0mag = Math.hypot(real[1], imag[1]) || 1;
+    for (let k = 1; k < nH; k++) {
+      real[k] /= f0mag;
+      imag[k] /= f0mag;
+    }
+    real[0] = 0;
+    imag[0] = 0;
+
+    return ctx.createPeriodicWave(real, imag);
+  };
 
 
 
@@ -543,6 +656,66 @@
       try { filter.frequency.setValueAtTime(val, t); } catch (e) {}
     };
 
+    // -- Formant automation helpers (morphTo / adjacent-morph fix) --
+    // When voiced phonemes are adjacent (a continuous voiced run), they share the
+    // same voiceFilters/sharedNoiseFilters frequency params. The old code called
+    //   cancelScheduledValues(t); setValueAtTime(onset, t);
+    // at the start of EVERY phoneme. Because the PREVIOUS phoneme's morph endpoint
+    // is scheduled at exactly time t, that cancelled it — so a morphTo diphthong
+    // followed by another voiced phoneme sounded flat (e.g. "a-aw" for "ay aw").
+    // The helpers below preserve the previous phoneme's endpoint when the run
+    // continues (isRunStart=false) and only glide (~GLIDE seconds) to this
+    // phoneme's onset before following its own formant schedule. Fresh runs
+    // (after a rest / at the start of a sequence) still hard-set at time t.
+    const GLIDE = 0.006; // seconds
+    const getFreqAt = (param, t) => {
+      try {
+        const v = param.getValueAtTime(t);
+        return Number.isFinite(v) ? v : null;
+      } catch (e) { return null; }
+    };
+    // Anchor the start of a phoneme on a frequency param.
+    // - Fresh run: cancel everything at t and hard-set the onset.
+    // - Continuing run: do NOT clobber the previous phoneme's ramp endpoint at t;
+    //   anchor a hold at t equal to the value already scheduled there (identical
+    //   audible curve), then glide to this phoneme's onset over GLIDE seconds.
+    const anchorStart = (param, t, isRunStart, onset) => {
+      const tOnset = t + (isRunStart ? 0 : GLIDE);
+      try {
+        if (isRunStart) {
+          param.cancelScheduledValues(t);
+          param.setValueAtTime(onset, t);
+        } else {
+          const cur = getFreqAt(param, t);
+          param.setValueAtTime(cur != null ? cur : onset, t);
+          param.linearRampToValueAtTime(onset, tOnset);
+        }
+        param.setValueAtTime(onset, tOnset);
+      } catch (e) {}
+    };
+    // Ramp onset -> target across [tOnset, endTime] (used by hasMorphTo).
+    const rampFreq = (param, t, isRunStart, onset, target, endTime) => {
+      try {
+        anchorStart(param, t, isRunStart, onset);
+        param.linearRampToValueAtTime(target, endTime);
+      } catch (e) {}
+    };
+    // Hold onset across the phoneme (used by nasal / no-target branches).
+    const holdFreq = (param, t, isRunStart, onset) => {
+      anchorStart(param, t, isRunStart, onset);
+    };
+    // Hold onset until rampStart, then ramp to target at endTime (hasVoicedTarget).
+    const holdThenRampFreq = (param, t, isRunStart, onset, rampStart, target, endTime) => {
+      const tOnset = t + (isRunStart ? 0 : GLIDE);
+      try {
+        anchorStart(param, t, isRunStart, onset);
+        if (rampStart > tOnset + 1e-4) {
+          param.setValueAtTime(onset, rampStart);
+        }
+        param.linearRampToValueAtTime(target, endTime);
+      } catch (e) {}
+    };
+
     // find next voiced phoneme (skip consonants/unvoiced) and return it
     const findNextVoiced = (i) => {
       for (let j = i + 1; j < phonemeSeq.length; j++) {
@@ -629,12 +802,32 @@
       // Check nextVoiced.morphs — if false, the next phone plays instantly without morph transition
       const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
 
+      // morphTo: ramp formants from f -> opt.morphTo across the FULL phoneme duration
+      // (bypasses morphTime). Mirrors the main synthesis loop for consistency.
+      const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length === numFormants;
+
       // if target is nasal, schedule a nasal transition instead of morphing formants toward nasal targets
       const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
       const morphStart = t + Math.max(0, d - morphTime);
       const morphEnd = t + d;
 
-      if (targetIsNasal) {
+      if (hasMorphTo) {
+        for (let idx = 0; idx < numFormants; idx++) {
+          const curVal = (f && f[idx]) || 0;
+          const morphVal = (opt.morphTo && opt.morphTo[idx]) || 0;
+          try {
+            voiceFilters[idx].frequency.cancelScheduledValues(t);
+            voiceFilters[idx].frequency.setValueAtTime(curVal, t);
+            voiceFilters[idx].frequency.linearRampToValueAtTime(morphVal, t + d);
+          } catch (e) {}
+          try {
+            sharedNoiseFilters[idx].frequency.cancelScheduledValues(t);
+            sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, t);
+            sharedNoiseFilters[idx].frequency.linearRampToValueAtTime(morphVal, t + d);
+          } catch (e) {}
+          try { voiceGains[idx].gain.setValueAtTime(1, t); } catch (e) {}
+        }
+      } else if (targetIsNasal) {
         // keep vowel formants at current values, but dip vowel gain slightly and add a nasal burst
         for (let idx = 0; idx < numFormants; idx++) {
           const curVal = (f && f[idx]) || 0;
@@ -691,19 +884,12 @@
         }
       }
 
-      // oscillator (voiced) - custom glottal source approximating Liljencrants-Fant model
+      // oscillator (voiced) - Rosenberg (1971) glottal pulse derivative source
       const osc = ctx.createOscillator();
 
-      const numHarmonics = 27;
-      const real = new Float32Array(numHarmonics);
-      const imag = new Float32Array(numHarmonics);
-
-      // Approximate LF glottal flow derivative spectrum: amplitudes decrease as 1/n^2 for more natural harmonics
-      for (let n = 1; n < numHarmonics; n++) {
-        real[n] = 1 / (n * n);
-      }
-
-      const glottalWave = ctx.createPeriodicWave(real, imag);
+      // Glottal flow derivative with proper phase dispersion; open quotient driven
+      // by clonedTimbre.duty so voice cloning can shape the pulse.
+      const glottalWave = createRosenbergGlottalWave(ctx, 27, clonedTimbre.duty);
       osc.setPeriodicWave(glottalWave);
       
       const pitchParam = osc.frequency;
@@ -712,10 +898,11 @@
       // vibrato
       // If vibFreq is provided for this phoneme (including vibFreq=0), override global vibrato settings.
       // Delay/FadeIn/Speed fields are beats-based (Delay/FadeIn) and treated like existing "vibFreq" semantics for rate.
-      const vibFreqForNote = Number.isFinite(p.vibFreq) ? p.vibFreq : vibFreq;
-      const vibDelayForNoteSec = Number.isFinite(p.vibDelay) ? p.vibDelay : vibDelay;
-      const vibFadeInForNoteSec = Number.isFinite(p.vibFadeIn) ? p.vibFadeIn : 0;
-      const vibSpeedForNote = Number.isFinite(p.vibSpeed) ? p.vibSpeed : null;
+      // Note: use opt.vib* (per-phoneme fields), falling back to the global vibrato params.
+      const vibFreqForNote = Number.isFinite(opt.vibFreq) ? opt.vibFreq : vibFreq;
+      const vibDelayForNoteSec = Number.isFinite(opt.vibDelay) ? opt.vibDelay : vibDelay;
+      const vibFadeInForNoteSec = Number.isFinite(opt.vibFadeIn) ? opt.vibFadeIn : 0;
+      const vibSpeedForNote = Number.isFinite(opt.vibSpeed) ? opt.vibSpeed : null;
 
       const vibForThis = (vibFreqForNote > 0 && vibDepth > 0 && mode !== "whisper");
       if (vibForThis && lfoGain && persistentVib) {
@@ -812,6 +999,10 @@
     let oscGain = null;
     let lastVoicedEnd = 0;
     let currentAmp = 0.9;
+    // Tracks whether the global persistent LFO is currently connected to the
+    // active oscillator's frequency param, so we can connect/disconnect it per
+    // note (needed for per-phoneme bracket vibrato overrides and [vf:0] off).
+    let vibConnected = false;
 
     // schedule phonemes
     let t = 0;
@@ -821,6 +1012,7 @@
       const nextVoiced = findNextVoiced(i);
 
       if (p.voiced && mode !== "whisper") {
+        const isRunStart = !currentOsc;
         if (!currentOsc) {
           // start new oscillator for voiced sequence
           currentOsc = ctx.createOscillator();
@@ -849,17 +1041,59 @@
         const pitchParam = currentOsc.frequency;
         pitchParam.setValueAtTime(p.pitch, t);
 
-        // vibrato
-        if (vibActive && lfoGain) {
-          lfoGain.connect(pitchParam);
-        } else if (!persistentVib && vibFreq > 0 && vibDepth > 0) {
+        // vibrato — per-phoneme aware: uses p.vib* fields from bracket overrides,
+        // falls back to global parameters. Handles persistent LFO connect/disconnect
+        // via vibConnected tracker.
+        const vibFreqForNote = Number.isFinite(p.vibFreq) ? p.vibFreq : vibFreq;
+        const vibDepthForNote = Number.isFinite(p.vibDepth) ? p.vibDepth : vibDepth;
+        const vibDelayForNoteSec = Number.isFinite(p.vibDelay) ? p.vibDelay : vibDelay;
+        const vibFadeInForNoteSec = Number.isFinite(p.vibFadeIn) ? p.vibFadeIn : 0;
+        const vibFadeOutForNoteSec = Number.isFinite(p.vibFadeOut) ? p.vibFadeOut : 0;
+        const vibSpeedForNote = Number.isFinite(p.vibSpeed) ? p.vibSpeed : null;
+
+        // Determine if vibrato should be active for this note (requires freq>0, depth>0, not whisper)
+        const vibeOnForThis = (vibFreqForNote > 0 && vibDepthForNote > 0 && mode !== "whisper");
+
+        if (vibeOnForThis && lfoGain && persistentVib) {
+          // Global persistent LFO — connect only once per oscillator run
+          if (!vibConnected) {
+            lfoGain.connect(pitchParam);
+            vibConnected = true;
+          }
+        } else {
+          // Disconnect global LFO if it was connected (e.g. [vf: 0] or per-note override that differs)
+          if (vibConnected) {
+            try { lfoGain.disconnect(pitchParam); } catch (e) {}
+            vibConnected = false;
+          }
+        }
+
+        // Schedule a per-note LFO only if:
+        //   - vibrato is active for this note, AND
+        //   - NOT using the persistent global LFO (i.e. persistentVib is false, OR there's no lfoGain)
+        // This ensures bracket overrides (vf, vd, vde, vfa, vfao) actually take effect per phoneme
+        // and supports disabling vibrato per note (e.g. [vf: 0]).
+        if (vibeOnForThis && !(lfoGain && persistentVib)) {
           const lfol = ctx.createOscillator();
           const lfoGl = ctx.createGain();
           lfol.type = "sine";
-          lfol.frequency.setValueAtTime(vibFreq, t);
-          lfoGl.gain.setValueAtTime(vibDepth, t);
+          const lfoRateHz = (vibSpeedForNote != null && vibSpeedForNote > 0) ? vibSpeedForNote : vibFreqForNote;
+          lfol.frequency.setValueAtTime(lfoRateHz, t);
+
+          const fadeStart = t + vibDelayForNoteSec;
+          const fadeEnd = fadeStart + Math.max(0, vibFadeInForNoteSec);
+          lfoGl.gain.setValueAtTime(0, fadeStart);
+          lfoGl.gain.linearRampToValueAtTime(vibDepthForNote, fadeEnd);
+
+          // FadeOut: ramp back to 0 at the end of the note
+          const fadeOutStart = t + p.d - Math.max(0, vibFadeOutForNoteSec);
+          if (fadeOutStart > fadeEnd) {
+            lfoGl.gain.setValueAtTime(vibDepthForNote, fadeOutStart);
+            lfoGl.gain.linearRampToValueAtTime(0, t + p.d);
+          }
+
           lfol.connect(lfoGl).connect(pitchParam);
-          lfol.start(t + vibDelay);
+          lfol.start(fadeStart);
           lfol.stop(t + p.d + 0.02);
         }
 
@@ -878,16 +1112,27 @@
         lastVoicedEnd = t + p.d;
 
         // morphing logic
+        // morphTo: ramp formants from p.f -> p.morphTo across the FULL phoneme duration
+        // (bypasses morphTime). This provides diphthong-style transitions like "ew".
+        const hasMorphTo = morphEnabled && p.morphTo && p.morphTo.length === numFormants;
         const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
         const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
         const morphStart = t + Math.max(0, p.d - morphTime);
         const morphEnd = t + p.d;
 
-        if (targetIsNasal) {
+        if (hasMorphTo) {
           for (let idx = 0; idx < numFormants; idx++) {
             const curVal = (p.f && p.f[idx]) || 0;
-            setFilterNow(voiceFilters[idx], t, curVal);
-            setFilterNow(sharedNoiseFilters[idx], t, curVal);
+            const morphVal = (p.morphTo && p.morphTo[idx]) || 0;
+            rampFreq(voiceFilters[idx].frequency, t, isRunStart, curVal, morphVal, t + p.d);
+            rampFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal, morphVal, t + p.d);
+            try { voiceGains[idx].gain.setValueAtTime(1, t); } catch (e) {}
+          }
+        } else if (targetIsNasal) {
+          for (let idx = 0; idx < numFormants; idx++) {
+            const curVal = (p.f && p.f[idx]) || 0;
+            holdFreq(voiceFilters[idx].frequency, t, isRunStart, curVal);
+            holdFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal);
             try {
               voiceGains[idx].gain.cancelScheduledValues(t);
               voiceGains[idx].gain.setValueAtTime(1, t);
@@ -904,22 +1149,14 @@
           for (let idx = 0; idx < numFormants; idx++) {
             const curVal = (p.f && p.f[idx]) || 0;
             const nextVal = (nextVoiced.f && nextVoiced.f[idx]) || 0;
-            try {
-              voiceFilters[idx].frequency.setValueAtTime(curVal, t);
-              voiceFilters[idx].frequency.setValueAtTime(curVal, morphStart);
-              voiceFilters[idx].frequency.linearRampToValueAtTime(nextVal, morphEnd);
-            } catch (e) {}
-            try {
-              sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, t);
-              sharedNoiseFilters[idx].frequency.setValueAtTime(curVal, morphStart);
-              sharedNoiseFilters[idx].frequency.linearRampToValueAtTime(nextVal, morphEnd);
-            } catch (e) {}
+            holdThenRampFreq(voiceFilters[idx].frequency, t, isRunStart, curVal, morphStart, nextVal, morphEnd);
+            holdThenRampFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal, morphStart, nextVal, morphEnd);
           }
         } else {
           for (let idx = 0; idx < numFormants; idx++) {
             const val = (p.f && p.f[idx]) || 0;
-            setFilterNow(voiceFilters[idx], t, val);
-            setFilterNow(sharedNoiseFilters[idx], t, val);
+            holdFreq(voiceFilters[idx].frequency, t, isRunStart, val);
+            holdFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, val);
             try { voiceGains[idx].gain.setValueAtTime(1, t); } catch (e) {}
           }
         }
@@ -1409,6 +1646,7 @@
   };
 
   synthBtn.onclick = async () => {
+    stopPreview();
     outputControls.innerHTML = ""; statusEl.textContent = "Parsing...";
     try {
       const text = container.querySelector("#phonemeInput").value;
@@ -1501,20 +1739,25 @@
       dl.style = "display:inline-block;margin-right:8px;margin-top:8px;";
       outputControls.appendChild(dl);
 
-      let actx = new (window.AudioContext || window.webkitAudioContext)();
-      let prevSrc
-      let previewBuf
-
       const playBtn = document.createElement("button");
       playBtn.textContent = "Preview"; playBtn.style = "margin-top:8px;padding:6px 12px;";
       playBtn.onclick = () => {
-        if (prevSrc) return;
+        stopPreview();
         actx = new (window.AudioContext || window.webkitAudioContext)();
         prevSrc = actx.createBufferSource();
         // Preview should match the downloaded WAV (normalized if enabled).
         previewBuf = actx.createBuffer(1, audioData.length, sampleRate);
         previewBuf.getChannelData(0).set(audioData);
         prevSrc.buffer = previewBuf;
+        prevSrc.onended = () => {
+          // natural-end cleanup: free shared preview state so a new preview can start
+          prevSrc = null;
+          previewBuf = null;
+          if (actx) {
+            try { actx.close(); } catch (e) {}
+            actx = null;
+          }
+        };
         prevSrc.connect(actx.destination);
         prevSrc.start();
       };
@@ -1522,12 +1765,7 @@
       const stopBtn = document.createElement("button");
       stopBtn.textContent = "Stop Preview"; stopBtn.style = "margin-top:8px;padding:6px 12px;";
       stopBtn.onclick = () => {
-        if (!prevSrc || !actx.destination) return;
-        prevSrc.disconnect(actx.destination);
-        prevSrc.stop();
-
-        prevSrc = null;
-        actx.close();
+        stopPreview();
       };
 
       outputControls.appendChild(playBtn);
@@ -1788,7 +2026,7 @@
 
   // Get phoneme type for coloring
   function getPhonemeType(phon) {
-    const vowels = ["a","aa","e","i","ee","I","o","u","y","w","r","l","uh","er","oy","aw"];
+    const vowels = ["a","aa","e","i","ee","I","o","u","y","w","r","l","uh","er","oy","aw","ew"];
     const nasals = ["m","n","ng"];
     if (vowels.includes(phon)) return "vowel";
     if (nasals.includes(phon)) return "nasal";
