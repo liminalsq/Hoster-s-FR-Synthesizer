@@ -12,12 +12,23 @@
   let dynamicMode = false;
   let consonantDuration = 0.1;
 
+// phonemeMap entries carry 6 formants (F4-F6 ignored by the 3-filter engine).
+  // morphTo checks must accept all 6 so diphthongs keep working.
+  const MAP_FORMANTS = 6;
+  const ENGINE_FORMANTS = 3;
+
+  // --- Experimental / for-fun options ---
+  let disableFormantFilter = false; // bypass the biquad formant filters
+  let oscType = "rosenburg";        // rosenburg(default) | sawtooth | square | custom
+  let customOscSample = null;       // decoded Float32Array for custom waveform
+  let customOscSampleRate = 44100;
+
   // preview playback state (shared so re-synthesizing stops any playing preview)
   let actx = null;
   let prevSrc = null;
   let previewBuf = null;
 
-  const stopPreview = () => {
+const stopPreview = () => {
     if (prevSrc) {
       try {
         prevSrc.onended = null;
@@ -27,6 +38,7 @@
       prevSrc = null;
     }
     previewBuf = null;
+    if (typeof stopVisualAnim === "function") stopVisualAnim();
     if (actx) {
       try { if (actx.state === "running") actx.close(); } catch (e) {}
       actx = null;
@@ -62,8 +74,9 @@
   const getAdjustedFormants = (baseF) => {
     let f = [...baseF];
     if (clonedRatios) {
-      // apply cloned voice ratios
-      f = f.map((freq, i) => freq * clonedRatios[i]);
+      // apply cloned voice ratios (voice cloning only supplies 3 formants, so
+      // guard the extra F4+ entries against NaN when the map has 6 formants)
+      f = f.map((freq, i) => freq * (clonedRatios[i] ?? 1));
     }
     // gender shift: scale frequencies (female higher, male lower)
     const scale = 1 + (genderShift / 100) * 0.3; // Â±30%
@@ -130,56 +143,74 @@
 
   // phoneme -> formant settings
   const phonemeMap = {
-    a: { f: [700, 1220, 2600], voiced: true },
-    aa: { f: [900, 1300, 2650], voiced: true },
-    e: { f: [500, 2300, 3000], voiced: true },
-    i: { f: [350, 2200, 2900], voiced: true },
-    ee: { f: [285, 2275, 2900], voiced: true },
-    I: { f: [440, 1200, 2700], voiced: true },
-    o: { f: [400, 1000, 2600], voiced: true },
-    u: { f: [325, 700, 2530], voiced: true },
-    y: { f: [300, 2000, 2800], voiced: true },
-    w: { f: [400, 1000, 2200], voiced: true },
-    r: { f: [450, 1300, 1700], voiced: true },
-    l: { f: [500, 820, 2400], voiced: true },
+    // --- VOWELS & LIQUIDS ---
+    a:   { f: [700, 1220, 2600, 3500, 4500, 5500], voiced: true },
+    ae:  { f: [620, 1660, 2430, 3700, 4700, 5700], voiced: true, morphTo: [650, 1490, 2470, 3700, 4700, 5700] },
+    aa:  { f: [900, 1300, 2650, 3550, 4500, 5500], voiced: true },
+    e:   { f: [500, 2300, 3000, 3600, 4600, 5600], voiced: true },
+    i:   { f: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
+    ee:  { f: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
+    I:   { f: [440, 1200, 2700, 3500, 4500, 5500], voiced: true },
+    o:   { f: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
+    u:   { f: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
+    y:   { f: [300, 2000, 2800, 3600, 4600, 5600], voiced: true },
+    w:   { f: [400, 1000, 2200, 3300, 4300, 5300], voiced: true },
+    r:   { f: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
+    l:   { f: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
 
-    // consonants & sibilants (some flagged voiced/unvoiced)
-    // Lower noise-related formant centers by ~50 to reduce harsh high-frequency energy.
-    h: { f: [750, 1750, 3150], breathy: true, amp: 0.9, voiced: false, noiseAmp: 1 },
-    s: { f: [2950, 4950, 3450], breathy: true, amp: 1.4, voiced: false, noiseAmp: 1 },
-    z: { f: [2950, 4450, 4950], breathy: true, amp: 1.4, voiced: true, noiseAmp: 1 },
-    t: { f: [950, 4450, 2950], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
-    d: { f: [355, 3160, 1605], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: .15, morphs: false },
-    k: { f: [1150, 1950, 3150], burst: true, short: true, voiced: false, noiseAmp: 1 },
-    g: { f: [850, 1650, 2650], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.3, morphs: false },
+    // --- CONSONANTS & SIBILANTS ---
+    h:  { f: [750,  1750, 3150, 3800, 4800, 5800], breathy: true, amp: 0.9, voiced: false, noiseAmp: 1 },
+    s:  { f: [320, 1390, 5500, 5900, 6800, 7800], breathy: true, amp: 1.4, voiced: false, noiseAmp: 1 },
+    z:  { f: [240, 1390, 5500, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.35 },
+    zh: { f: [270, 1840, 2750, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.2 },
+    t:  { f: [400,  1600, 2600, 4900, 5900, 6900], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
+    d:  { f: [355,  3160, 1605, 3800, 4800, 5800], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: 0.2, morphs: false },
+    k:  { f: [1150, 1950, 3150, 4100, 5100, 6100], burst: true, short: true, voiced: false, noiseAmp: 1 },
+    g:  { f: [200,  1990, 2850, 3600, 4600, 5600], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.3, morphs: false },
 
-    // nasals: flagged nasal: true
-    n: { f: [250, 1250, 2450], voiced: true, nasal: true, noiseAmp: 1 },
-    m: { f: [200, 1050, 2050], voiced: true, nasal: true, noiseAmp: 1 },
-    b: { f: [305, 1100, 2050], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
-    p: { f: [950, 1750, 2650], burst: true, short: true, voiced: false, noiseAmp: 1 },
-    f: { f: [1150, 2950, 4950], breathy: true, voiced: false, noiseAmp: 1 },
-    v: { f: [255, 2100, 3255], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
-    th: { f: [1150, 2150, 3450], breathy: true, voiced: false, noiseAmp: 1 },
-    sh: { f: [2450, 3050, 3950], breathy: true, voiced: false, noiseAmp: 1 },
-    ch: { f: [1950, 2950, 4450], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
-    uh: { f: [640, 945, 2550], voiced: true },
+    // --- NASALS & PLOSIVES/FRICATIVES ---
+    n:  { f: [250,  1250, 2450, 3400, 4400, 5400], voiced: true, nasal: true, noiseAmp: 1 },
+    m:  { f: [200,  1050, 2050, 3300, 4300, 5300], voiced: true, nasal: true, noiseAmp: 1 },
+    b:  { f: [305,  1100, 2050, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
+    p:  { f: [950,  1750, 2650, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
+    f:  { f: [1150, 2950, 4950, 5900, 6800, 7800], breathy: true, voiced: false, noiseAmp: 1 },
+    v:  { f: [255,  2100, 3255, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
+    th: { f: [1150, 2150, 3450, 4500, 5500, 6500], breathy: true, voiced: false, noiseAmp: 1 },
+    dh: { f: [670,  1550, 2855, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 1.15, amp: 0.55 },
+    sh: { f: [2450, 3050, 3950, 4900, 5900, 6900], breathy: true, voiced: false, noiseAmp: 1 },
+    ch: { f: [1950, 2950, 4450, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
+    uh: { f: [640,  945,  2550, 3500, 4500, 5500], voiced: true },
 
-    // added phones / fallbacks
-    er: { f: [550, 1200, 2450], morphTo: [450, 1300, 1700], voiced: true },
-    j: { f: [450, 1550, 2550], voiced: true },
-    ng: { f: [200, 850, 1950], voiced: true, nasal: true },
-    oy: { f: [600, 850, 2550], morphTo: [350, 2200, 2900], voiced: true },
-    ow: { f: [600, 1000, 2600], morphTo: [400, 1000, 2600], voiced: true },
-    ou: { f: [400, 1000, 2600], morphTo: [325, 700, 2530], voiced: true },
-    ay: { f: [650, 1250, 2550], morphTo: [350, 2200, 2900], voiced: true },
-    aw: { f: [650, 1250, 2550], morphTo: [400, 1000, 2600], voiced: true },
-    ew: { f: [300, 2000, 2800], morphTo: [325, 700, 2530], voiced: true },
-    ey: { f: [500, 2300, 3000], morphTo: [300, 2000, 2800], voiced: true },
-    uw: { f: [325, 700, 2530], morphTo: [325, 700, 2530], voiced: true },
-    iw: { f: [300, 2000, 2800], morphTo: [325, 700, 2530], voiced: true },
-    il: { f: [300, 2000, 2800], morphTo: [500, 820, 2400], voiced: true },
-    rest: { f: [0, 0, 0], voiced: false, burst: false, short: false, breathy: false }
+    // --- ADDED PHONES & DIPHTHONGS ---
+    er: { f: [550, 1200, 2450, 3300, 4300, 5300], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
+    j:  { f: [450, 1550, 2550, 3600, 4600, 5600], voiced: true, breathy: true, noiseAmp: 0.25 },
+    ng: { f: [200, 850,  1950, 3300, 4300, 5300], voiced: true, nasal: true },
+
+    oy: { f: [600, 850,  2550, 3400, 4400, 5400], morphTo: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
+    ow: { f: [600, 1000, 2600, 3400, 4400, 5400], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
+    ou: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
+    ol: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+
+    ay: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
+    aw: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
+    ar: { f: [700, 1220, 2600, 3500, 4500, 5500], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
+    al: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    aee:{ f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
+
+    ew: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
+    ey: { f: [500, 2300, 3000, 3600, 4600, 5600], morphTo: [300, 2000, 2800, 3600, 4600, 5600], voiced: true },
+    el: { f: [500, 2500, 3000, 3700, 4700, 5700], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+
+    uw: { f: [325, 700,  2530, 3300, 4300, 5300], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
+    ul: { f: [325, 700,  2530, 3300, 4300, 5300], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    ur: { f: [320, 700,  2530, 3300, 4300, 5300], morphTo: [420, 1300, 1700, 3200, 4300, 5300], voiced: true },
+
+    iw: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
+    il: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    ir: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [420, 1300, 1700, 3200, 4300, 5300], voiced: true },
+    iy: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
+
+    rest: { f: [0, 0, 0, 0, 0, 0], voiced: false, burst: false, short: false, breathy: false }
   };
 
   // --- CMUdict-based G2P + ARPAbet -> phonemeKey converter ---
@@ -484,67 +515,105 @@
   // roughly -12 dB/octave roll-off plus a characteristic phase dispersion that a
   // naive 1/n^2 cosine series cannot reproduce).
   const createRosenbergGlottalWave = (ctx, numHarmonics = 27, openQuotient = 0.55, returnQuotient = 0.2) => {
-    const N = 1024; // samples per period for the numeric pulse
-    const u = new Float64Array(N);
-
-    // Clamp open quotient to a sane vocal range and keep the return phase from
-    // overlapping the next period.
-    const OQ = Math.min(0.95, Math.max(0.1, openQuotient));
-    const RQ = Math.min(0.4, Math.max(0.02, returnQuotient));
-    const Topen = Math.max(1, Math.round(N * OQ));
-    const Tret = Math.max(1, Math.round(N * Math.min(RQ, 1 - OQ)));
-    const Tclose = N - Topen - Tret;
-
-    // 1) Build one period of the glottal flow.
-    for (let n = 0; n < Topen; n++) {
-      const x = n / Math.max(1, Topen - 1);
-      u[n] = 3 * x * x - 2 * x * x * x; // Rosenberg open phase: 0 -> 1
-    }
-    for (let n = 0; n < Tret; n++) {
-      const a = n / Math.max(1, Tret - 1); // 0..1 across the return phase
-      u[Topen + n] = Math.exp(-6 * a);      // fast exponential return to ~0.25%
-    }
-    // Closed phase is zero by default (u array initialized to 0).
-
-    // 2) Glottal flow derivative via backward difference.
-    const d = new Float64Array(N);
-    let maxAbs = 0;
-    for (let n = 1; n < N; n++) {
-      d[n] = u[n] - u[n - 1];
-      if (Math.abs(d[n]) > maxAbs) maxAbs = Math.abs(d[n]);
-    }
-    d[0] = d[N - 1]; // wrap for periodicity
-    if (maxAbs > 0) for (let n = 0; n < N; n++) d[n] /= maxAbs;
-
-    // 3) DFT to harmonic real/imag coefficients (amplitude roughly ~1/n roll-off
-    //    for the derivative, but with the correct phase relationships of a real
-    //    glottal pulse).
     const nH = Math.max(1, numHarmonics | 0);
     const real = new Float32Array(nH);
     const imag = new Float32Array(nH);
-    const scale = 2 / N;
+
+    // Clamp input parameters to standard physiological boundaries
+    const OQ = Math.min(0.95, Math.max(0.1, openQuotient));
+    const RQ = Math.min(0.4, Math.max(0.02, returnQuotient));
+
+    // Myriad Model Parameters:
+    // 1. Peak Glottal Flow asymmetry ratio (alpha)
+    const alpha = 1.0 / (1.0 - OQ); 
+    
+    // 2. Corner frequency attenuation factor (spectral tilt / spectral slope factor in dB/octave)
+    // Higher return quotient = stronger spectral attenuation at higher harmonics
+    const spectralTiltCutoff = 1.0 / (2.0 * Math.PI * RQ);
+
     for (let k = 1; k < nH; k++) {
-      let re = 0, im = 0;
-      for (let n = 0; n < N; n++) {
-        const ph = 2 * Math.PI * k * n / N;
-        re += d[n] * Math.cos(ph);
-        im += d[n] * Math.sin(ph);
-      }
-      real[k] = re * scale;
-      imag[k] = im * scale;
+      // Basic Rosenberg-C / LF harmonic envelope magnitude decay (~ -6 dB/octave base, modified by tilt)
+      // H(k) magnitude model: k / (1 + (k / kc)^2)
+      const normalizedFreq = k / (nH * 0.5);
+      const tiltAttenuation = 1.0 / (1.0 + Math.pow(k / spectralTiltCutoff, 2));
+      
+      // Direct spectral magnitude calculation
+      const mag = (1.0 / Math.pow(k, 1.05)) * tiltAttenuation;
+
+      // Asymmetric Phase alignment (controls the sharpness of the closing phase)
+      // Phase offset is determined by harmonic index and Open Quotient
+      const phase = -Math.PI * k * OQ * (1.0 - 0.25 * alpha * normalizedFreq);
+
+      // Convert Polar (Magnitude, Phase) -> Rectangular (Real, Imaginary)
+      real[k] = mag * Math.cos(phase);
+      imag[k] = mag * Math.sin(phase);
     }
 
-    // Normalize against the fundamental so output level is consistent regardless
-    // of open quotient, then strip DC.
+    // Normalize against fundamental (F0) magnitude so energy remains constant
     const f0mag = Math.hypot(real[1], imag[1]) || 1;
     for (let k = 1; k < nH; k++) {
       real[k] /= f0mag;
       imag[k] /= f0mag;
     }
+
+    // Strip DC offset
     real[0] = 0;
     imag[0] = 0;
 
     return ctx.createPeriodicWave(real, imag);
+  };
+
+  // Build a PeriodicWave from a single detected period of an uploaded sample.
+  const createPeriodicWaveFromSample = (ctx, data, sr) => {
+    const N = Math.min(4096, data.length);
+    const seg = data.slice(0, N);
+    // Autocorrelation to find the period length in samples.
+    const minLag = Math.max(1, Math.floor(sr / 2000));
+    const maxLag = Math.min(N - 2, Math.floor(sr / 40));
+    let bestCorr = -Infinity;
+    let period = Math.floor(sr / 220);
+    for (let lag = minLag; lag < maxLag; lag++) {
+      let corr = 0;
+      const span = N - lag;
+      for (let i = 0; i < span; i++) corr += seg[i] * seg[i + lag];
+      corr /= span;
+      if (corr > bestCorr) { bestCorr = corr; period = lag; }
+    }
+    const pN = Math.max(2, Math.min(period, N));
+    const onePeriod = new Float32Array(pN);
+    for (let i = 0; i < pN; i++) onePeriod[i] = seg[i];
+    const numHarmonics = 27;
+    const real = new Float32Array(numHarmonics);
+    const imag = new Float32Array(numHarmonics);
+    const scale = 2 / pN;
+    for (let k = 1; k < numHarmonics; k++) {
+      let re = 0, im = 0;
+      for (let n = 0; n < pN; n++) {
+        const ph = 2 * Math.PI * k * n / pN;
+        re += onePeriod[n] * Math.cos(ph);
+        im += onePeriod[n] * Math.sin(ph);
+      }
+      real[k] = re * scale;
+      imag[k] = im * scale;
+    }
+    const f0mag = Math.hypot(real[1], imag[1]) || 1;
+    for (let k = 1; k < numHarmonics; k++) { real[k] /= f0mag; imag[k] /= f0mag; }
+    real[0] = 0; imag[0] = 0;
+    return ctx.createPeriodicWave(real, imag);
+  };
+
+  // Create an oscillator configured per the selected experimental oscillator type.
+  const createSelectedOsc = (ctx) => {
+    const osc = ctx.createOscillator();
+    const t = oscType || "rosenburg";
+    if (t === "sawtooth") osc.type = "sawtooth";
+    else if (t === "square") osc.type = "square";
+    else if (t === "custom" && customOscSample) {
+      osc.setPeriodicWave(createPeriodicWaveFromSample(ctx, customOscSample, customOscSampleRate));
+    } else {
+      osc.setPeriodicWave(createRosenbergGlottalWave(ctx, 27, clonedTimbre.duty));
+    }
+    return osc;
   };
 
 
@@ -802,9 +871,11 @@
       // Check nextVoiced.morphs — if false, the next phone plays instantly without morph transition
       const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
 
-      // morphTo: ramp formants from f -> opt.morphTo across the FULL phoneme duration
+// morphTo: ramp formants from f -> opt.morphTo across the FULL phoneme duration
       // (bypasses morphTime). Mirrors the main synthesis loop for consistency.
-      const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length === numFormants;
+      // Note: phonemeMap entries carry 6 formants (F4-F6 ignored by the 3-filter
+      // engine), so accept >= numFormants here.
+const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORMANTS;
 
       // if target is nasal, schedule a nasal transition instead of morphing formants toward nasal targets
       const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
@@ -1111,10 +1182,12 @@
         // update lastVoicedEnd
         lastVoicedEnd = t + p.d;
 
-        // morphing logic
+// morphing logic
         // morphTo: ramp formants from p.f -> p.morphTo across the FULL phoneme duration
         // (bypasses morphTime). This provides diphthong-style transitions like "ew".
-        const hasMorphTo = morphEnabled && p.morphTo && p.morphTo.length === numFormants;
+// Note: phonemeMap entries carry 6 formants (F4-F6 ignored by the 3-filter
+        // engine), so accept all 6 here.
+        const hasMorphTo = morphEnabled && p.morphTo && p.morphTo.length >= MAP_FORMANTS;
         const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
         const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
         const morphStart = t + Math.max(0, p.d - morphTime);
@@ -1217,8 +1290,42 @@
   container.className = "voice-ui";
   container.style = "margin:0 auto;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;max-width:900px;box-sizing:border-box;";
   container.innerHTML = `
-    <h3 style="margin:0 0 8px 0">HOSTERS FR SYNTHESIZER</h3>
-    <div style="font-size:12px;margin-bottom:8px">HOSTERS VERY HUMAN SYNTHESIZER</div>
+    <h3 style="margin:0 0 8px 0">Hoster's FR Synthesizer</h3>
+<div style="font-size:12px;margin-bottom:8px">Javascript Synth that sings for u or smth and is (probably) very buggy and makes artifacts</div>
+<div style="font0size:12px;margin-bottom:8px">This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)</div>
+<div stlye="font-size:12px;margin-bottom:8px">this is ai-written but give me some credit, at least i did SOME of the work...</div>
+    <!-- Visual Frame -->
+    <div id="visualFrame" style="position:fixed; top:10px; right:10px; width:240px; height:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
+      <div style="font-weight:bold; text-align:center; font-size:13px; border-bottom:1px solid #ccc; padding-bottom:2px;">Visual</div>
+      <canvas id="visualCanvas" width="210" height="140" style="display:block; margin:4px auto;"></canvas>
+      <div id="visualFormants" style="text-align:center; font-size:11px; margin-top:4px;">F1: 0&nbsp;&nbsp;F2: 0&nbsp;&nbsp;F3: 0</div>
+      <div id="visualPhone" style="text-align:center; font-size:11px; margin-top:3px;">Current Phone: None</div>
+    </div>
+    <!-- Experimental / Useless / For Fun -->
+    <div id="experimentalPanel" style="position:fixed; top:258px; right:10px; width:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
+      <div style="font-weight:bold; text-align:center; font-size:12px; border-bottom:1px solid #ccc; padding-bottom:2px;">Experimental/Useless/For Fun</div>
+      <div style="margin-top:4px; font-size:11px;">
+        <label style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="disableFilters"/>
+          Disable biquad/formant filter
+        </label>
+      </div>
+      <div style="margin-top:6px; font-size:11px;">
+        <label>Oscillator / Glottal pulse:
+          <select id="oscTypeSel" style="width:100%; margin-top:2px;">
+            <option value="rosenburg">Rosenburg/Default</option>
+            <option value="sawtooth">Sawtooth</option>
+            <option value="square">Square</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+      </div>
+      <div id="customOscControls" style="display:none; margin-top:6px; font-size:11px;">
+        <button id="uploadOscBtn" style="width:100%; padding:4px 6px;">Upload oscillator sample</button>
+        <input type="file" id="oscFile" accept="audio/*" style="display:none;"/>
+        <div id="oscStatus" style="margin-top:3px; font-size:10px; color:#555;"></div>
+      </div>
+    </div>
     <label style="display:block">Melody / Text:<br/>
       <textarea id="phonemeInput" rows="4" style="width:100%;font-family:monospace;">d<c2,0.1> o<c2,0.9> r<d2,0.1> e<d2,0.9> m<e2,0.1> i<e2,0.9> f<f2,0.1> a<f2,0.9> s<g2,0.1> o<g2,0.9> l<a2,0.1> a<a2,0.9> t<b2,0.1> i<b2,0.9> d<c3,0.1> o<c3,0.9></textarea>
     </label>
@@ -1294,7 +1401,7 @@
       <div style="font-size:12px; margin-top:6px; color:#444">Notes map to phoneme <b>a</b>. Gaps map to <b>rest</b>. Enable the toggle to keep current phonemes but replace their <code><pitch,duration></code>.</div>
     </div>
     <div id="outputControls" style="margin-top:8px"></div>
-    <!-- Piano Roll Section -->
+<!-- Piano Roll Section -->
     <div style="margin-top:12px; padding-top:8px; border-top:1px dashed #ddd;">
       <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
         <span style="font-size:12px; font-weight:bold;">Piano Roll</span>
@@ -1303,11 +1410,14 @@
           <button id="pianoRollRefreshBtn" style="margin-left:6px; padding:2px 6px; font-size:11px;">Refresh from text</button>
         </div>
       </div>
-      <div id="pianoRollContainer" style="position:relative; border:1px solid #999; overflow:auto; width:100%; height:350px; background:#f8f8f8;">
-        <canvas id="pianoRollCanvas" style="display:block;"></canvas>
+      <div style="display:flex; gap:8px; align-items:flex-start;">
+        <div id="pianoRollPanel" style="width:180px; flex:0 0 180px; border:1px solid #ccc; background:#fff; padding:8px; font-size:12px; box-sizing:border-box;"></div>
+        <div id="pianoRollContainer" style="position:relative; border:1px solid #999; overflow:auto; width:100%; height:350px; background:#f8f8f8;">
+          <canvas id="pianoRollCanvas" style="display:block;"></canvas>
+        </div>
       </div>
       <div style="font-size:11px; margin-top:4px; color:#555;">
-        Click grid to add note | Drag note to move | Drag edges to resize | Delete key removes selected | Double-click to edit phoneme
+        Click grid to add note | Drag note to move | Drag edges to resize | Delete key removes selected | Shift+Click or Shift+Drag to select multiple | Double-click to edit phoneme
       </div>
     </div>
   `;
@@ -1401,6 +1511,36 @@
   // Set initial values
   dynamicModeEl.checked = dynamicMode;
   consonantDurationEl.value = consonantDuration;
+
+  // --- Experimental / for-fun panel wiring ---
+  const disableFiltersEl = container.querySelector("#disableFilters");
+  const oscTypeSel = container.querySelector("#oscTypeSel");
+  const customOscControlsEl = container.querySelector("#customOscControls");
+  const uploadOscBtn = container.querySelector("#uploadOscBtn");
+  const oscFileEl = container.querySelector("#oscFile");
+  const oscStatusEl = container.querySelector("#oscStatus");
+
+  disableFiltersEl.addEventListener("change", (e) => disableFormantFilter = e.target.checked);
+  oscTypeSel.addEventListener("change", () => {
+    oscType = oscTypeSel.value;
+    customOscControlsEl.style.display = oscType === "custom" ? "block" : "none";
+  });
+  uploadOscBtn.addEventListener("click", () => oscFileEl.click());
+  oscFileEl.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const ab = await file.arrayBuffer();
+      const buf = await tmpCtx.decodeAudioData(ab);
+      customOscSample = buf.getChannelData(0);
+      customOscSampleRate = buf.sampleRate;
+      try { tmpCtx.close(); } catch (err) {}
+      oscStatusEl.textContent = `Loaded (${(buf.duration || 0).toFixed(2)}s)`;
+    } catch (err) {
+      oscStatusEl.textContent = "Error: " + (err.message || err);
+    }
+  });
 
   // --- MIDI Import ---
   const midiFileEl = container.querySelector("#midiFile");
@@ -1741,7 +1881,7 @@
 
       const playBtn = document.createElement("button");
       playBtn.textContent = "Preview"; playBtn.style = "margin-top:8px;padding:6px 12px;";
-      playBtn.onclick = () => {
+playBtn.onclick = () => {
         stopPreview();
         actx = new (window.AudioContext || window.webkitAudioContext)();
         prevSrc = actx.createBufferSource();
@@ -1749,10 +1889,15 @@
         previewBuf = actx.createBuffer(1, audioData.length, sampleRate);
         previewBuf.getChannelData(0).set(audioData);
         prevSrc.buffer = previewBuf;
-        prevSrc.onended = () => {
+        // Start the real-time formant mouth visualization.
+        visualSeq = phonemeSeq;
+        visualStartTime = actx.currentTime;
+        startVisualAnim();
+prevSrc.onended = () => {
           // natural-end cleanup: free shared preview state so a new preview can start
           prevSrc = null;
           previewBuf = null;
+          if (typeof stopVisualAnim === "function") stopVisualAnim();
           if (actx) {
             try { actx.close(); } catch (e) {}
             actx = null;
@@ -1777,6 +1922,177 @@
     }
   };
 
+// ======== VISUAL FRAME (formant-driven mouth) ========
+  const visualCanvas = container.querySelector("#visualCanvas");
+  const visualCtx = visualCanvas.getContext("2d");
+  const visualFormantsEl = container.querySelector("#visualFormants");
+  const visualPhoneEl = container.querySelector("#visualPhone");
+  let visualAnimId = null;
+  let visualStartTime = 0;
+  let visualSeq = [];
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Draw the mouth based on the current formant values.
+  // - F1 controls jaw drop (mouth height / bottom teeth drop).
+  // - F2 controls tongue size.
+  // - F3 controls mouth width.
+  // When F1 and F3 produce matching normalized values, the mouth is a circle.
+function drawVisual(f1, f2, f3, phone, phonemeKey) {
+    const c = visualCtx;
+    const W = visualCanvas.width, H = visualCanvas.height;
+    c.clearRect(0, 0, W, H);
+
+    const cx = W / 2, cy = H / 2;
+
+    // --- Phoneme-based mouth rules ---
+    // Closed mouth (straight line) for bilabial/rest phonemes.
+    const closedMouthPhonemes = ["m", "b", "p", "v", "f", "rest"];
+    const isClosedMouth = closedMouthPhonemes.includes(phonemeKey);
+
+    // Check if the phoneme is breathy (teeth close together).
+    const phData = phonemeMap[phonemeKey];
+    const isBreathy = phData && phData.breathy;
+
+    const f1n = clamp((f1 - 200) / 800, 0, 1);
+    const f3n = clamp((f3 - 2000) / 1500, 0, 1);
+
+    let mouthW, mouthH;
+    if (isClosedMouth) {
+      // Closed mouth: a thin horizontal line
+      mouthW = 56;
+      mouthH = 4;
+    } else {
+      // Normal open mouth based on formants
+      mouthW = 46 + 44 * f3n;
+      mouthH = 40 + 44 * f1n;
+    }
+
+    const mouthRx = mouthW / 2, mouthRy = mouthH / 2;
+    const tongueR = 8 + 20 * clamp((f2 - 700) / 1800, 0, 1); // tongue from F2
+
+    const mouthPath = () => {
+      c.beginPath();
+      c.ellipse(cx, cy, mouthRx, mouthRy, 0, 0, Math.PI * 2);
+    };
+
+    // Cavity (black filling) — only when mouth is open enough
+    if (mouthH > 6) {
+      mouthPath();
+      c.fillStyle = "#000";
+      c.fill();
+    }
+
+    // Mask everything inside the mouth cavity so teeth/tongue appear behind lips.
+    c.save();
+    mouthPath();
+    c.clip();
+
+    // Tongue (red circle, behind teeth) — only if mouth is open
+    if (mouthH > 6 && !isClosedMouth) {
+      const tongueY = cy + mouthRy * 0.35;
+      c.beginPath();
+      c.arc(cx, tongueY, tongueR, 0, Math.PI * 2);
+      c.fillStyle = "#e03a3a";
+      c.fill();
+    }
+
+    // Teeth — only if mouth is open enough
+    if (mouthH > 6) {
+      const toothW = Math.max(6, mouthW * 0.92);
+      // For breathy phonemes, teeth are close together (small gap)
+      let toothH;
+      if (isBreathy) {
+        toothH = Math.max(4, mouthRy * 0.95); // much smaller teeth height = close together
+      } else {
+        toothH = Math.max(5, mouthRy * 0.3);
+      }
+      c.fillStyle = "#ffffff";
+      // Top teeth
+      c.fillRect(cx - toothW / 2, cy - mouthRy, toothW, toothH);
+      // Bottom teeth (near the bottom of the mouth)
+      c.fillRect(cx - toothW / 2, cy + mouthRy - toothH, toothW, toothH);
+    }
+
+    c.restore();
+
+    // Lips outline (black, thicker)
+    mouthPath();
+    c.strokeStyle = "#000";
+    c.lineWidth = 4;
+    c.stroke();
+
+    visualFormantsEl.innerHTML = `F1: ${Math.round(f1)}&nbsp;&nbsp;F2: ${Math.round(f2)}&nbsp;&nbsp;F3: ${Math.round(f3)}`;
+    visualPhoneEl.textContent = phone ? `Current Phone: ${phone}` : "Current Phone: None";
+  }
+
+  function startVisualAnim() {
+    stopVisualAnim();
+    visualAnimId = requestAnimationFrame(animTick);
+  }
+
+  function stopVisualAnim() {
+    if (visualAnimId) {
+      cancelAnimationFrame(visualAnimId);
+      visualAnimId = null;
+    }
+  }
+
+  // Animation tick: find the currently-playing phoneme and update the mouth.
+  function animTick() {
+    const elapsed = actx ? actx.currentTime - visualStartTime : 0;
+    let t = 0;
+    let cur = null;
+    let curStart = 0;
+    let curIndex = -1;
+    for (let i = 0; i < visualSeq.length; i++) {
+      const p = visualSeq[i];
+      if (elapsed < t + p.d) { cur = p; curStart = t; curIndex = i; break; }
+      t += p.d;
+    }
+
+    if (cur && cur.f) {
+      let f = cur.f.slice();
+
+      // Only smooth toward a target when formant morphing is enabled, using the
+      // same morphTime window the synthesis engine uses at the end of each phone.
+      const morphEnabled = !!container.querySelector("#enableMorph").checked;
+      const morphTime = Math.max(0, parseFloat(container.querySelector("#morphTime").value) || 0);
+
+let target = null;
+      if (morphEnabled && morphTime > 0) {
+if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
+          // Diphthong/glide: morph toward this phoneme's own target.
+          target = cur.morphTo;
+        } else {
+          // Otherwise glide toward the next voiced phoneme's formants.
+          for (let j = curIndex + 1; j < visualSeq.length; j++) {
+            const n = visualSeq[j];
+            if (n && n.voiced && n.f) { target = n.f; break; }
+          }
+        }
+      }
+
+      if (target) {
+        // Windowed transition over `morphTime` at the end of the phoneme.
+        const dur = Math.max(0.0001, morphTime);
+        const morphStart = curStart + Math.max(0, cur.d - morphTime);
+        if (elapsed >= morphStart) {
+          const seg = clamp((elapsed - morphStart) / dur, 0, 1);
+          // const prog = 1 - Math.pow(1 - seg, 2); // gentle ease-out for smoother motion
+         const prog = seg * seg * (3 - 2 * seg);
+          f = f.map((v, i) => v + (target[i] - v) * prog);
+        }
+      }
+
+      drawVisual(f[0], f[1], f[2], cur.key, cur.key);
+    } else {
+      drawVisual(0, 0, 0, cur ? cur.key : null, cur ? cur.key : null);
+    }
+
+    visualAnimId = requestAnimationFrame(animTick);
+  }
+
   // ======== PIANO ROLL IMPLEMENTATION ========
   const pianoRollContainer = container.querySelector("#pianoRollContainer");
   const pianoRollCanvas = container.querySelector("#pianoRollCanvas");
@@ -1794,11 +2110,34 @@
   // Note names for display (C0-based for internal, but we show C2-C6)
   const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 
-  // Piano roll state
+// Piano roll state
   let pianoRollNotes = []; // { phoneme, pitchName, midiNote, startBeat, durBeats, startPx, durPx }
   let selectedNoteIndex = -1;
-  let dragState = null; // { type: 'move'|'resizeLeft'|'resizeRight', noteIdx, startX, startY, origStartBeat, origDurBeats, origPitch }
+  let selectedNoteIndexes = new Set(); // multi-selection
+  let dragState = null; // { type: 'move'|'resizeLeft'|'resizeRight', noteIdx, startX, startY, origStartBeat, origDurBeats, origMidi, origPitches:[{startBeat,midiNote,durBeats}] }
   let hoveredEdge = null; // { noteIdx, side: 'left'|'right' }
+  let shiftHeld = false;
+  let selectionState = null; // { startX, startY, curX, curY }
+  let skipReparse = false;   // while dragging, don't re-parse from text (preserves absolute positions)
+  let consonantWrapperEnabled = true; // default ON
+  const pianoRollPanelEl = container.querySelector("#pianoRollPanel");
+
+  // Style rules for the left piano-roll panel (note editor controls).
+  const prStyle = document.createElement("style");
+  prStyle.textContent = `
+    #pianoRollPanel .pe-label{font-size:11px;color:#555;margin-top:9px;}
+    #pianoRollPanel .pe-input{width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;margin-top:2px;padding:2px 4px;border:1px solid #ccc;border-radius:2px;}
+    #pianoRollPanel .pe-btn{display:inline-block;margin:8px 4px 0 0;padding:4px 8px;font-size:11px;}
+    #pianoRollPanel .pe-total{font-size:11px;color:#777;margin-top:6px;}
+    #pianoRollPanel .pe-hint{font-size:11px;color:#777;margin-top:6px;}
+  `;
+  document.head.appendChild(prStyle);
+
+  // consonant phoneme set (for consonant wrapping)
+  const CONSONANT_PHONEMES = new Set([
+    "h","s","z","t","d","k","g","n","m","b","p","f","v","th","dh","sh","ch",
+    "j","ng","r","l","w","y"
+  ]);
 
   // Parse the text input and build piano roll notes
   function parsePianoRollFromText(text, bpm, gridType, stepsPerBeat) {
@@ -1882,6 +2221,42 @@
     return Math.round(val / gridSize) * gridSize;
   }
 
+// Build display notes for consonant wrapping.
+  // When the wrapper is enabled, a consonant note immediately preceding a
+  // vowel note (adjacent in time, same pitch) is merged into a single visual
+  // group labelled like "[tew]". The underlying text tokens remain separate.
+  function buildDisplayNotes() {
+    if (!consonantWrapperEnabled) {
+      return pianoRollNotes.map((n, i) => ({ noteIdx: i, phoneme: n.phoneme, midiNote: n.midiNote, startBeat: n.startBeat, durBeats: n.durBeats, wrapped: false }));
+    }
+    const display = [];
+    const used = new Set();
+    for (let i = 0; i < pianoRollNotes.length; i++) {
+      if (used.has(i)) continue;
+      const n = pianoRollNotes[i];
+      // If this is a consonant directly before a vowel (adjacent, same pitch), wrap them.
+      const next = pianoRollNotes[i + 1];
+      if (next && CONSONANT_PHONEMES.has(n.phoneme) && !CONSONANT_PHONEMES.has(next.phoneme)
+          && Math.abs(n.startBeat + n.durBeats - next.startBeat) < 0.01
+          && n.midiNote === next.midiNote) {
+        display.push({
+          noteIdx: i,
+          phoneme: `[${n.phoneme}${next.phoneme}]`,
+          midiNote: n.midiNote,
+          startBeat: n.startBeat,
+          durBeats: n.durBeats + next.durBeats,
+          wrapped: true,
+          secondIdx: i + 1
+        });
+        used.add(i);
+        used.add(i + 1);
+      } else {
+        display.push({ noteIdx: i, phoneme: n.phoneme, midiNote: n.midiNote, startBeat: n.startBeat, durBeats: n.durBeats, wrapped: false });
+      }
+    }
+    return display;
+  }
+
   function drawPianoRoll() {
     const text = container.querySelector("#phonemeInput").value;
     const bpm = parseFloat(container.querySelector("#bpm").value) || 120;
@@ -1889,7 +2264,12 @@
     const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
     const beatLen = 60 / bpm;
 
-    pianoRollNotes = parsePianoRollFromText(text, bpm, gridType, stepsPerBeat);
+    // Drag-fix: while dragging, do NOT re-parse from text (which would reconstruct
+    // sequential positions and push notes forward). Use the in-memory notes.
+    if (!skipReparse) {
+      pianoRollNotes = parsePianoRollFromText(text, bpm, gridType, stepsPerBeat);
+    }
+    const displayNotes = buildDisplayNotes();
     const range = getMidiRange(pianoRollNotes);
     const totalBeats = getTotalBeats(pianoRollNotes);
 
@@ -1952,23 +2332,31 @@
       }
     }
 
-    // Draw notes
-    for (let idx = 0; idx < pianoRollNotes.length; idx++) {
-      const note = pianoRollNotes[idx];
-      const keyIndex = range.max - note.midiNote;
-      const x = KEYBOARD_WIDTH + note.startBeat * PIXELS_PER_BEAT;
+// Draw notes (using display notes so consonant+vowel can be wrapped)
+    for (let d = 0; d < displayNotes.length; d++) {
+      const disp = displayNotes[d];
+      const keyIndex = range.max - disp.midiNote;
+      const x = KEYBOARD_WIDTH + disp.startBeat * PIXELS_PER_BEAT;
       const y = keyIndex * NOTE_HEIGHT + 5;
-      const w = Math.max(MIN_NOTE_DURATION_PX, note.durBeats * PIXELS_PER_BEAT);
+      const w = Math.max(MIN_NOTE_DURATION_PX, disp.durBeats * PIXELS_PER_BEAT);
       const h = NOTE_HEIGHT - 2;
 
-      // Store pixel positions for hit-testing
-      note.startPx = x;
-      note.durPx = w;
+      // Store pixel positions for hit-testing on the underlying note(s)
+      const baseNote = pianoRollNotes[disp.noteIdx];
+      if (baseNote) {
+        baseNote.startPx = x;
+        baseNote.durPx = w;
+      }
+      if (disp.wrapped && disp.secondIdx != null && pianoRollNotes[disp.secondIdx]) {
+        pianoRollNotes[disp.secondIdx].startPx = x;
+        pianoRollNotes[disp.secondIdx].durPx = w;
+      }
 
-      const isSelected = idx === selectedNoteIndex;
+      const isSelected = selectedNoteIndexes.has(disp.noteIdx) ||
+        (disp.wrapped && disp.secondIdx != null && selectedNoteIndexes.has(disp.secondIdx));
 
       // Note color based on phoneme type
-      const phonType = getPhonemeType(note.phoneme);
+      const phonType = getPhonemeType(baseNote ? baseNote.phoneme : disp.phoneme);
       let color;
       switch (phonType) {
         case "vowel": color = isSelected ? "#4a90d9" : "#6db3f2"; break;
@@ -1999,10 +2387,10 @@
         c.stroke();
       }
 
-      // Phoneme label
+      // Phoneme label (use the wrapped label like "[tew]" when applicable)
       c.fillStyle = "#fff";
       c.font = "10px monospace";
-      c.fillText(note.phoneme, x + 4, y + 10);
+      c.fillText(disp.phoneme, x + 4, y + 10);
     }
 
     // Edge hover indicators
@@ -2022,6 +2410,19 @@
         }
       }
     }
+
+    // Selection box
+    if (selectionState) {
+      const x0 = Math.min(selectionState.startX, selectionState.curX);
+      const y0 = Math.min(selectionState.startY, selectionState.curY);
+      const w0 = Math.abs(selectionState.curX - selectionState.startX);
+      const h0 = Math.abs(selectionState.curY - selectionState.startY);
+      c.strokeStyle = "rgba(0,120,255,0.9)";
+      c.lineWidth = 1;
+      c.strokeRect(x0, y0, w0, h0);
+      c.fillStyle = "rgba(0,120,255,0.12)";
+      c.fillRect(x0, y0, w0, h0);
+    }
   }
 
   // Get phoneme type for coloring
@@ -2031,6 +2432,269 @@
     if (vowels.includes(phon)) return "vowel";
     if (nasals.includes(phon)) return "nasal";
     return "consonant";
+  }
+
+  // --- Left panel (note editor / piano roll settings) helpers ---
+  function escapeHtml(s) {
+    const q = String.fromCharCode;
+    const ampersand = q(38); // &
+    const lt = q(60);         // <
+    const gt = q(62);         // >
+    const dq = q(34);         // "
+    const sq = q(39);         // '
+    return String(s).replace(/[&<>"']/g, function (c) {
+      if (c === ampersand) return ampersand + 'amp;';
+      if (c === lt) return ampersand + 'lt;';
+      if (c === gt) return ampersand + 'gt;';
+      if (c === dq) return ampersand + 'quot;';
+      if (c === sq) return ampersand + '#39;';
+      return c;
+    });
+  }
+  function fmtNum(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "0";
+    return (Math.round(n * 1000) / 1000).toString();
+  }
+  function unitsForNote(durBeats, gridType, stepsPerBeat) {
+    if (gridType === "steps") return durBeats * stepsPerBeat;
+    if (gridType === "seconds") return durBeats * (60 / (parseFloat(container.querySelector("#bpm").value) || 120));
+    return durBeats;
+  }
+
+  // Render/update the left panel based on the current selection.
+  // - No selection            -> piano-roll settings (consonant wrapper toggle, snap, refresh).
+  // - Single selected note    -> note editor (phoneme, start/end split when a consonant+vowel is
+  //                              wrapped into a visual "[cv]" group).
+  // - Multi-selection         -> summary + deselect.
+  function updatePianoRollPanel() {
+    if (!pianoRollPanelEl) return;
+    const gridType = container.querySelector("#gridType").value || "beats";
+    const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
+
+    if (selectedNoteIndexes.size === 0) {
+      // Piano roll settings.
+      let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Piano Roll Settings</div>`;
+      h += `<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;">
+              <input type="checkbox" id="prConsonantWrap" ${consonantWrapperEnabled ? "checked" : ""}/>
+              Consonant wrapping
+            </label>`;
+      h += `<label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;">
+              <input type="checkbox" id="prSnap" ${pianoRollSnap.checked ? "checked" : ""}/>
+              Snap to grid
+            </label>`;
+      h += `<button id="prRefreshBtn" class="pe-btn">Refresh from text</button>`;
+      h += `<div class="pe-hint">Click to add note • drag to move • drag edges to resize • Shift+Click/Drag to multi-select • Delete to remove • Double-click to edit phoneme</div>`;
+      pianoRollPanelEl.innerHTML = h;
+
+      const wrapChk = pianoRollPanelEl.querySelector("#prConsonantWrap");
+      if (wrapChk) wrapChk.addEventListener("change", (e) => {
+        consonantWrapperEnabled = e.target.checked;
+        drawPianoRoll();
+        updatePianoRollPanel();
+      });
+      const snapChk = pianoRollPanelEl.querySelector("#prSnap");
+      if (snapChk) snapChk.addEventListener("change", (e) => { pianoRollSnap.checked = e.target.checked; });
+      const refreshBtn = pianoRollPanelEl.querySelector("#prRefreshBtn");
+      if (refreshBtn) refreshBtn.addEventListener("click", () => {
+        selectedNoteIndex = -1;
+        drawPianoRoll();
+        updatePianoRollPanel();
+      });
+      return;
+    }
+
+    if (selectedNoteIndexes.size > 1) {
+      // Multi-selection summary.
+      let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Selection</div>`;
+      h += `<div class="pe-total">${selectedNoteIndexes.size} notes selected</div>`;
+      h += `<button id="prDeselect" class="pe-btn">Deselect</button>`;
+      pianoRollPanelEl.innerHTML = h;
+      const ds = pianoRollPanelEl.querySelector("#prDeselect");
+      if (ds) ds.addEventListener("click", () => {
+        selectedNoteIndexes.clear();
+        selectedNoteIndex = -1;
+        drawPianoRoll();
+        updatePianoRollPanel();
+      });
+      return;
+    }
+
+    // Single selection: find the underlying note index.
+    const selIdx = [...selectedNoteIndexes][0];
+    const note = pianoRollNotes[selIdx];
+    if (!note) return;
+
+    // Determine if this note is the vowel (second) half of a wrapped consonant group,
+    // or the consonant (first) half. If the neighbour forms a wrapped group, show split fields.
+    let startPhone = null, startPhoneLength = null, endPhone = null, endPhoneLength = null;
+    let isWrappedGroup = false;
+
+    const prev = selIdx > 0 ? pianoRollNotes[selIdx - 1] : null;
+    const next = selIdx + 1 < pianoRollNotes.length ? pianoRollNotes[selIdx + 1] : null;
+
+    const wrapsWithPrev = consonantWrapperEnabled && prev
+      && CONSONANT_PHONEMES.has(prev.phoneme) && !CONSONANT_PHONEMES.has(note.phoneme)
+      && Math.abs(prev.startBeat + prev.durBeats - note.startBeat) < 0.01
+      && prev.midiNote === note.midiNote;
+    const wrapsWithNext = consonantWrapperEnabled && next
+      && CONSONANT_PHONEMES.has(note.phoneme) && !CONSONANT_PHONEMES.has(next.phoneme)
+      && Math.abs(note.startBeat + note.durBeats - next.startBeat) < 0.01
+      && note.midiNote === next.midiNote;
+
+    if (wrapsWithPrev) {
+      startPhone = prev.phoneme;
+      startPhoneLength = unitsForNote(prev.durBeats, gridType, stepsPerBeat);
+      endPhone = note.phoneme;
+      endPhoneLength = unitsForNote(note.durBeats, gridType, stepsPerBeat);
+      isWrappedGroup = true;
+    } else if (wrapsWithNext) {
+      startPhone = note.phoneme;
+      startPhoneLength = unitsForNote(note.durBeats, gridType, stepsPerBeat);
+      endPhone = next.phoneme;
+      endPhoneLength = unitsForNote(next.durBeats, gridType, stepsPerBeat);
+      isWrappedGroup = true;
+    }
+
+    let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Note Editor</div>`;
+    h += `<label class="pe-label">Phoneme<br/>
+            <input class="pe-input" id="prPhoneme" value="${escapeHtml(note.phoneme)}"/>
+          </label>`;
+    h += `<label class="pe-label">Pitch<br/>
+            <input class="pe-input" id="prPitch" value="${escapeHtml(note.pitchName)}"/>
+          </label>`;
+    h += `<label class="pe-label">Start (${gridType})<br/>
+            <input class="pe-input" type="number" step="0.001" id="prStart" value="${fmtNum(unitsForNote(note.startBeat, gridType, stepsPerBeat))}"/>
+          </label>`;
+    h += `<label class="pe-label">Length (${gridType})<br/>
+            <input class="pe-input" type="number" step="0.001" id="prLen" value="${fmtNum(unitsForNote(note.durBeats, gridType, stepsPerBeat))}"/>
+          </label>`;
+
+    // When part of a wrapped group, allow editing the two halves separately.
+    if (isWrappedGroup && startPhone != null && endPhone != null) {
+      h += `<div style="margin-top:9px;padding-top:6px;border-top:1px dashed #ddd;">
+              <div style="font-size:11px;color:#333;font-weight:bold;">Consonant+Vowel split</div>`;
+      h += `<label class="pe-label">startPhone<br/>
+              <input class="pe-input" id="prStartPhone" value="${escapeHtml(startPhone)}"/>
+            </label>`;
+      h += `<label class="pe-label">startPhoneLength (${gridType})<br/>
+              <input class="pe-input" type="number" step="0.001" id="prStartPhoneLen" value="${fmtNum(startPhoneLength)}"/>
+            </label>`;
+      h += `<label class="pe-label">endPhone<br/>
+              <input class="pe-input" id="prEndPhone" value="${escapeHtml(endPhone)}"/>
+            </label>`;
+      h += `<label class="pe-label">endPhoneLength (${gridType})<br/>
+              <input class="pe-input" type="number" step="0.001" id="prEndPhoneLen" value="${fmtNum(endPhoneLength)}"/>
+            </label>`;
+      h += `</div>`;
+    }
+
+    h += `<button id="prDelete" class="pe-btn">Delete</button>`;
+    h += `<button id="prDeselect" class="pe-btn">Deselect</button>`;
+    pianoRollPanelEl.innerHTML = h;
+
+    const parseBeatFromUnits = (units, gridType2, steps2) => {
+      if (gridType2 === "steps") return units / steps2;
+      if (gridType2 === "seconds") return units / ((parseFloat(container.querySelector("#bpm").value) || 120) / 60);
+      return units;
+    };
+
+    const applySplit = () => {
+      const sPhone = (pianoRollPanelEl.querySelector("#prStartPhone") || {}).value;
+      const ePhone = (pianoRollPanelEl.querySelector("#prEndPhone") || {}).value;
+      const sLen = parseFloat((pianoRollPanelEl.querySelector("#prStartPhoneLen") || {}).value);
+      const eLen = parseFloat((pianoRollPanelEl.querySelector("#prEndPhoneLen") || {}).value);
+
+      const targetA = wrapsWithPrev ? prev : note;
+      const targetB = wrapsWithPrev ? note : next;
+      if (sPhone != null && String(sPhone).trim()) targetA.phoneme = String(sPhone).trim().toLowerCase();
+      if (ePhone != null && String(ePhone).trim()) targetB.phoneme = String(ePhone).trim().toLowerCase();
+      if (Number.isFinite(sLen) && sLen > 0) targetA.durBeats = parseBeatFromUnits(sLen, gridType, stepsPerBeat);
+      if (Number.isFinite(eLen) && eLen > 0) targetB.durBeats = parseBeatFromUnits(eLen, gridType, stepsPerBeat);
+      updateTextFromPianoRoll();
+      drawPianoRoll();
+      updatePianoRollPanel();
+    };
+
+    const phonemeInput2 = pianoRollPanelEl.querySelector("#prPhoneme");
+    if (phonemeInput2) phonemeInput2.addEventListener("change", () => {
+      if (String(phonemeInput2.value).trim()) {
+        note.phoneme = String(phonemeInput2.value).trim().toLowerCase();
+        updateTextFromPianoRoll();
+        drawPianoRoll();
+        updatePianoRollPanel();
+      }
+    });
+    const pitchInput = pianoRollPanelEl.querySelector("#prPitch");
+    if (pitchInput) pitchInput.addEventListener("change", () => {
+      const v = String(pitchInput.value).trim();
+      const midi = pitchNameToMidi(v);
+      if (midi !== null) {
+        note.pitchName = v;
+        note.midiNote = midi;
+        updateTextFromPianoRoll();
+        drawPianoRoll();
+        updatePianoRollPanel();
+      }
+    });
+    const startInput = pianoRollPanelEl.querySelector("#prStart");
+    if (startInput) startInput.addEventListener("change", () => {
+      const v = parseFloat(startInput.value);
+      if (Number.isFinite(v)) {
+        note.startBeat = parseBeatFromUnits(v, gridType, stepsPerBeat);
+        updateTextFromPianoRoll();
+        drawPianoRoll();
+        updatePianoRollPanel();
+      }
+    });
+    const lenInput = pianoRollPanelEl.querySelector("#prLen");
+    if (lenInput) lenInput.addEventListener("change", () => {
+      const v = parseFloat(lenInput.value);
+      if (Number.isFinite(v) && v > 0) {
+        note.durBeats = parseBeatFromUnits(v, gridType, stepsPerBeat);
+        updateTextFromPianoRoll();
+        drawPianoRoll();
+        updatePianoRollPanel();
+      }
+    });
+
+    const splitBtn = pianoRollPanelEl.querySelector("#prApplySplit");
+    // If the split section is shown, wire its inputs to update on change.
+    const anySplitInput = pianoRollPanelEl.querySelector("#prStartPhone") ||
+      pianoRollPanelEl.querySelector("#prEndPhone") ||
+      pianoRollPanelEl.querySelector("#prStartPhoneLen") ||
+      pianoRollPanelEl.querySelector("#prEndPhoneLen");
+    if (anySplitInput) {
+      for (const el of [pianoRollPanelEl.querySelector("#prStartPhone"),
+                        pianoRollPanelEl.querySelector("#prEndPhone"),
+                        pianoRollPanelEl.querySelector("#prStartPhoneLen"),
+                        pianoRollPanelEl.querySelector("#prEndPhoneLen")].filter(Boolean)) {
+        el.addEventListener("change", applySplit);
+      }
+    }
+
+    const deleteBtn = pianoRollPanelEl.querySelector("#prDelete");
+    if (deleteBtn) deleteBtn.addEventListener("click", () => {
+      if (wrapsWithPrev) {
+        pianoRollNotes.splice(selIdx - 1, 2);
+      } else if (wrapsWithNext) {
+        pianoRollNotes.splice(selIdx, 2);
+      } else {
+        pianoRollNotes.splice(selIdx, 1);
+      }
+      selectedNoteIndexes.clear();
+      selectedNoteIndex = -1;
+      updateTextFromPianoRoll();
+      drawPianoRoll();
+      updatePianoRollPanel();
+    });
+    const ds2 = pianoRollPanelEl.querySelector("#prDeselect");
+    if (ds2) ds2.addEventListener("click", () => {
+      selectedNoteIndexes.clear();
+      selectedNoteIndex = -1;
+      drawPianoRoll();
+      updatePianoRollPanel();
+    });
   }
 
   // Update text input from piano roll notes
@@ -2108,7 +2772,7 @@
     return { beat, midiNote, pitchName: midiToNoteName(midiNote) };
   }
 
-  // Mouse events
+// Mouse events
   pianoRollCanvas.addEventListener("mousedown", (e) => {
     const rect = pianoRollCanvas.getBoundingClientRect();
     const scaleX = pianoRollCanvas.width / rect.width;
@@ -2118,8 +2782,28 @@
 
     const hit = hitTestNotes(mouseX, mouseY);
     if (hit) {
-      selectedNoteIndex = hit.noteIdx;
+      // Shift+Click toggles multi-selection; otherwise select only this note.
+      if (e.shiftKey) {
+        if (selectedNoteIndexes.has(hit.noteIdx)) {
+          selectedNoteIndexes.delete(hit.noteIdx);
+          if (selectedNoteIndexes.size === 0) selectedNoteIndex = -1;
+        } else {
+          selectedNoteIndexes.add(hit.noteIdx);
+          selectedNoteIndex = hit.noteIdx;
+        }
+      } else {
+        selectedNoteIndexes = new Set([hit.noteIdx]);
+        selectedNoteIndex = hit.noteIdx;
+      }
+
       const note = pianoRollNotes[hit.noteIdx];
+      // Capture original positions for all selected notes so multi-select drag
+      // moves/resizes them together from their original spot.
+      const origPitches = [];
+      for (const idx of selectedNoteIndexes) {
+        const n = pianoRollNotes[idx];
+        if (n) origPitches.push({ idx, startBeat: n.startBeat, midiNote: n.midiNote, durBeats: n.durBeats });
+      }
       dragState = {
         type: hit.action,
         noteIdx: hit.noteIdx,
@@ -2127,14 +2811,25 @@
         startY: mouseY,
         origStartBeat: note.startBeat,
         origDurBeats: note.durBeats,
-        origMidi: note.midiNote
+        origMidi: note.midiNote,
+        origPitches
       };
+      skipReparse = true; // preserve absolute positions while dragging
       drawPianoRoll();
       return;
     }
 
-    // Click on empty space: add a new note
+    // Click on empty space
+    if (e.shiftKey) {
+      // Shift+Drag on empty space draws a selection box (no note added).
+      selectionState = { startX: mouseX, startY: mouseY, curX: mouseX, curY: mouseY };
+      drawPianoRoll();
+      return;
+    }
+
+    // Plain click on empty space: add a new note
     selectedNoteIndex = -1;
+    selectedNoteIndexes.clear();
     const grid = mouseToGrid(mouseX, mouseY);
     if (mouseX > KEYBOARD_WIDTH) {
       const newNote = {
@@ -2147,6 +2842,7 @@
       pianoRollNotes.push(newNote);
       pianoRollNotes.sort((a, b) => a.startBeat - b.startBeat || a.midiNote - b.midiNote);
       selectedNoteIndex = pianoRollNotes.indexOf(newNote);
+      selectedNoteIndexes = new Set([selectedNoteIndex]);
       updateTextFromPianoRoll();
       drawPianoRoll();
     }
@@ -2177,7 +2873,15 @@
       }
     }
 
-    // Drag handling
+// Selection box drawing while dragging on empty space
+    if (selectionState) {
+      selectionState.curX = mouseX;
+      selectionState.curY = mouseY;
+      drawPianoRoll();
+      return;
+    }
+
+    // Drag handling (single note or multi-selection)
     if (dragState) {
       const note = pianoRollNotes[dragState.noteIdx];
       if (!note) return;
@@ -2191,19 +2895,44 @@
         let newStart = dragState.origStartBeat + dxBeats;
         if (pianoRollSnap.checked) newStart = snapToGrid(newStart, snapResolution);
         newStart = Math.max(0, newStart);
-        note.startBeat = newStart;
 
         // Change pitch based on vertical drag
         const dyKeys = Math.round((mouseY - dragState.startY) / NOTE_HEIGHT);
         let newMidi = dragState.origMidi - dyKeys;
         newMidi = Math.max(0, Math.min(127, newMidi));
+
+        note.startBeat = newStart;
         note.midiNote = newMidi;
         note.pitchName = midiToNoteName(newMidi);
+
+        // Move all other selected notes by the same horizontal/vertical delta.
+        if (dragState.origPitches) {
+          const dStart = newStart - dragState.origStartBeat;
+          const dNote = newMidi - dragState.origMidi;
+          for (const op of dragState.origPitches) {
+            if (op.idx === dragState.noteIdx) continue;
+            const n = pianoRollNotes[op.idx];
+            if (!n) continue;
+            n.startBeat = Math.max(0, op.startBeat + dStart);
+            n.midiNote = Math.max(0, Math.min(127, op.midiNote + dNote));
+            n.pitchName = midiToNoteName(n.midiNote);
+          }
+        }
       } else if (dragState.type === "resizeRight") {
         let newDur = dragState.origDurBeats + dxBeats;
         if (pianoRollSnap.checked) newDur = snapToGrid(newDur, snapResolution);
         newDur = Math.max(0.125, newDur);
+        // Apply the same duration delta to every selected note.
+        const dDur = newDur - dragState.origDurBeats;
         note.durBeats = newDur;
+        if (dragState.origPitches) {
+          for (const op of dragState.origPitches) {
+            if (op.idx === dragState.noteIdx) continue;
+            const n = pianoRollNotes[op.idx];
+            if (!n) continue;
+            n.durBeats = Math.max(0.125, op.durBeats + dDur);
+          }
+        }
       } else if (dragState.type === "resizeLeft") {
         let newStart = dragState.origStartBeat + dxBeats;
         let newDur = dragState.origDurBeats - dxBeats;
@@ -2214,8 +2943,20 @@
         }
         newStart = Math.max(0, newStart);
         newDur = Math.max(0.125, newDur);
+        // Apply the same start+end delta to every selected note.
+        const dStart = newStart - dragState.origStartBeat;
+        const dDur = newDur - dragState.origDurBeats;
         note.startBeat = newStart;
         note.durBeats = newDur;
+        if (dragState.origPitches) {
+          for (const op of dragState.origPitches) {
+            if (op.idx === dragState.noteIdx) continue;
+            const n = pianoRollNotes[op.idx];
+            if (!n) continue;
+            n.startBeat = Math.max(0, op.startBeat + dStart);
+            n.durBeats = Math.max(0.125, op.durBeats + dDur);
+          }
+        }
       }
 
       updateTextFromPianoRoll();
@@ -2226,6 +2967,31 @@
   window.addEventListener("mouseup", () => {
     if (dragState) {
       dragState = null;
+      skipReparse = false;
+      drawPianoRoll();
+    }
+    if (selectionState) {
+      // Finalize the marquee selection: select any notes whose rectangle
+      // intersects the dragged box.
+      const x0 = Math.min(selectionState.startX, selectionState.curX);
+      const y0 = Math.min(selectionState.startY, selectionState.curY);
+      const x1 = Math.max(selectionState.startX, selectionState.curX);
+      const y1 = Math.max(selectionState.startY, selectionState.curY);
+      const range = getMidiRange(pianoRollNotes);
+      const newSel = new Set();
+      for (let i = 0; i < pianoRollNotes.length; i++) {
+        const n = pianoRollNotes[i];
+        const keyIndex = range.max - n.midiNote;
+        const ny = keyIndex * NOTE_HEIGHT + 5;
+        const nh = NOTE_HEIGHT - 2;
+        const nx = n.startPx;
+        const nw = n.durPx;
+        const overlaps = nx < x1 && (nx + nw) > x0 && ny < y1 && (ny + nh) > y0;
+        if (overlaps) newSel.add(i);
+      }
+      selectedNoteIndexes = newSel;
+      selectedNoteIndex = newSel.size > 0 ? Math.min(...newSel) : -1;
+      selectionState = null;
       drawPianoRoll();
     }
   });
@@ -2250,14 +3016,19 @@
     }
   });
 
-  // Delete key to remove selected note
+// Delete key to remove all selected notes
   document.addEventListener("keydown", (e) => {
     if (e.key === "Delete" || e.key === "Backspace") {
       // Only if piano roll is visible and focused
       if (document.activeElement === pianoRollCanvas || document.activeElement === pianoRollContainer) {
         e.preventDefault();
-        if (selectedNoteIndex >= 0 && selectedNoteIndex < pianoRollNotes.length) {
-          pianoRollNotes.splice(selectedNoteIndex, 1);
+        if (selectedNoteIndexes.size > 0) {
+          // Remove all selected notes (descending index to avoid shifting).
+          const idxs = [...selectedNoteIndexes].sort((a, b) => b - a);
+          for (const idx of idxs) {
+            if (idx >= 0 && idx < pianoRollNotes.length) pianoRollNotes.splice(idx, 1);
+          }
+          selectedNoteIndexes.clear();
           selectedNoteIndex = -1;
           updateTextFromPianoRoll();
           drawPianoRoll();
