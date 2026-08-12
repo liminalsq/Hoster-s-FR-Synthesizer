@@ -2002,7 +2002,7 @@ function drawVisual(f1, f2, f3, phone, phonemeKey) {
       const toothW = Math.max(6, mouthW * 0.92);
       // For breathy phonemes, teeth are close together (small gap)
       let toothH;
-      if (isBreathy) {
+      if (isBreathy || phonemeKey === "k") {
         toothH = Math.max(4, mouthRy * 0.95); // much smaller teeth height = close together
       } else {
         toothH = Math.max(5, mouthRy * 0.3);
