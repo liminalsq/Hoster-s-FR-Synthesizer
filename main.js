@@ -176,7 +176,7 @@ const stopPreview = () => {
     f:  { f: [1150, 2950, 4950, 5900, 6800, 7800], breathy: true, voiced: false, noiseAmp: 1 },
     v:  { f: [255,  2100, 3255, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
     th: { f: [1150, 2150, 3450, 4500, 5500, 6500], breathy: true, voiced: false, noiseAmp: 1 },
-    dh: { f: [270,  1290, 2540, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 0.45, amp: 0.55 },
+    dh: { f: [270,  1290, 2540, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 0.15, amp: 0.55 },
     sh: { f: [2450, 3050, 3950, 4900, 5900, 6900], breathy: true, voiced: false, noiseAmp: 1 },
     ch: { f: [1950, 2950, 4450, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
     uh: { f: [640,  945,  2550, 3500, 4500, 5500], voiced: true },
