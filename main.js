@@ -1292,8 +1292,8 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
   container.innerHTML = `
     <h3 style="margin:0 0 8px 0">Hoster's FR Synthesizer</h3>
 <div style="font-size:12px;margin-bottom:8px">Javascript Synth that sings for u or smth and is (probably) very buggy and makes artifacts</div>
-<div style="font0size:12px;margin-bottom:8px">This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)</div>
-<div stlye="font-size:12px;margin-bottom:8px">this is ai-written but give me some credit, at least i did SOME of the work...</div>
+<div style="font-size:12px;margin-bottom:8px">This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)</div>
+<div style="font-size:12px;margin-bottom:16px">this is ai-written but give me some credit, at least i did SOME of the work...</div>
     <!-- Visual Frame -->
     <div id="visualFrame" style="position:fixed; top:10px; right:10px; width:240px; height:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
       <div style="font-weight:bold; text-align:center; font-size:13px; border-bottom:1px solid #ccc; padding-bottom:2px;">Visual</div>
