@@ -156,7 +156,7 @@ const stopPreview = () => {
     y:   { f: [300, 2000, 2800, 3600, 4600, 5600], voiced: true },
     w:   { f: [290, 610, 2150, 3300, 4300, 5300], voiced: true },
     r:   { f: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
-    l:   { f: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    l:   { f: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
 
     // --- CONSONANTS & SIBILANTS ---
     h:  { f: [750,  1750, 3150, 3800, 4800, 5800], breathy: true, amp: 0.9, voiced: false, noiseAmp: 1 },
@@ -179,7 +179,7 @@ const stopPreview = () => {
     dh: { f: [270,  1290, 2540, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 0.25, amp: 0.55 },
     sh: { f: [2450, 3050, 3950, 4900, 5900, 6900], breathy: true, voiced: false, noiseAmp: 1 },
     ch: { f: [1950, 2950, 4450, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
-    uh: { f: [640,  945,  2550, 3500, 4500, 5500], voiced: true },
+    uh: { f: [450,  1100,  2350, 3500, 4500, 5500], voiced: true },
 
     // --- ADDED PHONES & DIPHTHONGS ---
     er: { f: [550, 1200, 2450, 3300, 4300, 5300], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
@@ -615,8 +615,6 @@ const stopPreview = () => {
     }
     return osc;
   };
-
-
 
   // synthesize with nasal-aware transitions and humanizing features
   const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1) => {
@@ -1087,14 +1085,24 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
         if (!currentOsc) {
           // start new oscillator for voiced sequence
           currentOsc = ctx.createOscillator();
+
           const numHarmonics = 27;
           const real = new Float32Array(numHarmonics);
           const imag = new Float32Array(numHarmonics);
           for (let n = 1; n < numHarmonics; n++) {
             real[n] = 1 / (n * n);
           }
-          const glottalWave = ctx.createPeriodicWave(real, imag);
-          currentOsc.setPeriodicWave(glottalWave);
+
+          if (oscType === "rosenburg"){
+            const glottalWave = ctx.createPeriodicWave(real, imag);
+            currentOsc.setPeriodicWave(glottalWave);
+          } else {
+            if (oscType !== "custom"){
+              currentOsc.type = oscType
+            } else {
+              currentOsc = createSelectedOsc(ctx)
+            };
+          };
 
           oscGain = ctx.createGain();
           const fadeTime = 0.01;
