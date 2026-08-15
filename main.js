@@ -38,7 +38,7 @@ const stopPreview = () => {
       prevSrc = null;
     }
     previewBuf = null;
-    if (typeof stopVisualAnim === "function") stopVisualAnim();
+    //if (typeof stopVisualAnim === "function") stopVisualAnim();
     if (actx) {
       try { if (actx.state === "running") actx.close(); } catch (e) {}
       actx = null;
@@ -1914,7 +1914,7 @@ prevSrc.onended = () => {
           // natural-end cleanup: free shared preview state so a new preview can start
           prevSrc = null;
           previewBuf = null;
-          if (typeof stopVisualAnim === "function") stopVisualAnim();
+          //if (typeof stopVisualAnim === "function") stopVisualAnim();
           if (actx) {
             try { actx.close(); } catch (e) {}
             actx = null;
@@ -1948,6 +1948,46 @@ prevSrc.onended = () => {
   let visualStartTime = 0;
   let visualSeq = [];
 
+  // Floating & Rotation state
+  let floatTime = 0;
+  let mouthRotTime = 0;
+  let eyesRotTime = 0;
+
+  // Smooth mouth height transition state
+  let currentMouthH = 4; // Start near closed state
+
+  // Eye blinking state
+  let blinkState = {
+    isBlinking: false,
+    progress: 0,
+    timer: 120
+  };
+
+  function updateFaceState() {
+    // Main position float speed
+    floatTime += 0.04;
+
+    // Independent, slower time counters for rotational drift
+    mouthRotTime += 0.012;
+    eyesRotTime += 0.017;
+
+    // Random smooth blinking logic
+    if (!blinkState.isBlinking) {
+      blinkState.timer--;
+      if (blinkState.timer <= 0) {
+        blinkState.isBlinking = true;
+        blinkState.progress = 0;
+      }
+    } else {
+      blinkState.progress += 0.15;
+      if (blinkState.progress >= Math.PI) {
+        blinkState.isBlinking = false;
+        blinkState.progress = 0;
+        blinkState.timer = Math.floor(120 + Math.random() * 180);
+      }
+    }
+  }
+
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
   // Draw the mouth based on the current formant values.
@@ -1955,90 +1995,159 @@ prevSrc.onended = () => {
   // - F2 controls tongue size.
   // - F3 controls mouth width.
   // When F1 and F3 produce matching normalized values, the mouth is a circle.
-function drawVisual(f1, f2, f3, phone, phonemeKey) {
+  function drawVisual(f1, f2, f3, phone, phonemeKey) {
+    // Update floating offset, independent rotations & eye blink state
+    updateFaceState();
+
     const c = visualCtx;
     const W = visualCanvas.width, H = visualCanvas.height;
     c.clearRect(0, 0, W, H);
 
-    const cx = W / 2, cy = H / 2;
+    // --- Positional Floating (Linear bobbing) ---
+    const floatY = Math.sin(floatTime) * 8;
+    const floatX = Math.cos(floatTime * 0.5) * 4;
 
-    // --- Phoneme-based mouth rules ---
-    // Closed mouth (straight line) for bilabial/rest phonemes.
+    const cx = W / 2 + floatX;
+    const cy = H / 2 + floatY;
+
+    // --- Rotational Float Angles (Slower & Subtle) ---
+    const mouthRotAngle = Math.sin(mouthRotTime) * 0.04; // ~ ±2.3°
+    const eyesRotAngle = Math.sin(eyesRotTime + 1.2) * 0.06; // ~ ±3.4°
+
+    // --- Phoneme & State check ---
+    // Treat missing phone/key or explicitly idle keys as rest
+    const effectiveKey = phonemeKey || "rest";
     const closedMouthPhonemes = ["m", "b", "p", "v", "f", "rest"];
-    const isClosedMouth = closedMouthPhonemes.includes(phonemeKey);
+    const isClosedMouth = !phone || closedMouthPhonemes.includes(effectiveKey);
 
-    // Check if the phoneme is breathy (teeth close together).
-    const phData = phonemeMap[phonemeKey];
+    const phData = phonemeMap[effectiveKey];
     const isBreathy = phData && phData.breathy;
 
     const f1n = clamp((f1 - 200) / 800, 0, 1);
     const f3n = clamp((f3 - 2000) / 1500, 0, 1);
 
-    let mouthW, mouthH;
+    // Downscaled mouth dimensions
+    const mouthScale = 0.75;
+
+    let targetMouthW, targetMouthH;
     if (isClosedMouth) {
-      // Closed mouth: a thin horizontal line
-      mouthW = 56;
-      mouthH = 4;
+      targetMouthW = 56 * mouthScale;
+      targetMouthH = 2; // Flat target line height
     } else {
-      // Normal open mouth based on formants
-      mouthW = 46 + 44 * f3n;
-      mouthH = 40 + 44 * f1n;
+      targetMouthW = (46 + 44 * f3n) * mouthScale;
+      targetMouthH = (40 + 44 * f1n) * mouthScale;
     }
 
-    const mouthRx = mouthW / 2, mouthRy = mouthH / 2;
-    const tongueR = 8 + 20 * clamp((f2 - 700) / 1800, 0, 1); // tongue from F2
+    // --- Smooth Height Interpolation (Lerp) ---
+    // Adjust 0.2 to make closing faster (e.g. 0.3) or smoother/slower (e.g. 0.1)
+    currentMouthH += (targetMouthH - currentMouthH) * 0.2;
 
-    const mouthPath = () => {
-      c.beginPath();
-      c.ellipse(cx, cy, mouthRx, mouthRy, 0, 0, Math.PI * 2);
-    };
+    const mouthW = targetMouthW;
+    const mouthH = currentMouthH;
 
-    // Cavity (black filling) — only when mouth is open enough
-    if (mouthH > 6) {
-      mouthPath();
-      c.fillStyle = "#000";
-      c.fill();
-    }
+    const mouthRx = mouthW / 2;
+    const mouthRy = Math.max(0.5, mouthH / 2);
+    const tongueR = (8 + 20 * clamp((f2 - 700) / 1800, 0, 1)) * mouthScale;
 
-    // Mask everything inside the mouth cavity so teeth/tongue appear behind lips.
+    // ==========================================
+    // 1. EYES
+    // ==========================================
+    const eyeOffsetX = 24 * mouthScale;
+    const eyeCenterY = cy - 32;
+    const eyeRadius = 4;
+
+    const blinkFactor = blinkState.isBlinking ? Math.sin(blinkState.progress) : 0;
+    const currentEyeScaleY = 1 - blinkFactor;
+
     c.save();
-    mouthPath();
-    c.clip();
+    c.translate(cx, eyeCenterY);
+    c.rotate(eyesRotAngle);
 
-    // Tongue (red circle, behind teeth) — only if mouth is open
-    if (mouthH > 6 && !isClosedMouth) {
-      const tongueY = cy + mouthRy * 0.35;
-      c.beginPath();
-      c.arc(cx, tongueY, tongueR, 0, Math.PI * 2);
-      c.fillStyle = "#e03a3a";
-      c.fill();
-    }
+    c.fillStyle = "#000";
 
-    // Teeth — only if mouth is open enough
-    if (mouthH > 6) {
-      const toothW = Math.max(6, mouthW * 0.92);
-      // For breathy phonemes, teeth are close together (small gap)
-      let toothH;
-      if (isBreathy || phonemeKey === "k") {
-        toothH = Math.max(4, mouthRy * 0.95); // much smaller teeth height = close together
-      } else {
-        toothH = Math.max(5, mouthRy * 0.3);
-      }
-      c.fillStyle = "#ffffff";
-      // Top teeth
-      c.fillRect(cx - toothW / 2, cy - mouthRy, toothW, toothH);
-      // Bottom teeth (near the bottom of the mouth)
-      c.fillRect(cx - toothW / 2, cy + mouthRy - toothH, toothW, toothH);
-    }
+    // Left Eye
+    c.beginPath();
+    c.ellipse(-eyeOffsetX, 0, eyeRadius, Math.max(0.5, eyeRadius * currentEyeScaleY), 0, 0, Math.PI * 2);
+    c.fill();
+
+    // Right Eye
+    c.beginPath();
+    c.ellipse(eyeOffsetX, 0, eyeRadius, Math.max(0.5, eyeRadius * currentEyeScaleY), 0, 0, Math.PI * 2);
+    c.fill();
 
     c.restore();
 
-    // Lips outline (black, thicker)
-    mouthPath();
-    c.strokeStyle = "#000";
-    c.lineWidth = 4;
-    c.stroke();
+    // ==========================================
+    // 2. MOUTH (With independent floating rotation)
+    // ==========================================
+    c.save();
+    c.translate(cx, cy);
+    c.rotate(mouthRotAngle);
 
+    // Consider mouth open only if height is clearly visible
+    const isOpenEnough = mouthH > 5 * mouthScale;
+
+    if (isOpenEnough) {
+      const mouthPath = () => {
+        c.beginPath();
+        c.ellipse(0, 0, mouthRx, mouthRy, 0, 0, Math.PI * 2);
+      };
+
+      // Cavity (black background)
+      mouthPath();
+      c.fillStyle = "#000";
+      c.fill();
+
+      // Clip interior elements to mouth cavity
+      c.save();
+      mouthPath();
+      c.clip();
+
+      // Tongue
+      if (!isClosedMouth) {
+        const tongueY = mouthRy * 0.35;
+        c.beginPath();
+        c.arc(0, tongueY, tongueR, 0, Math.PI * 2);
+        c.fillStyle = "#e03a3a";
+        c.fill();
+      }
+
+      // Teeth
+      const toothW = Math.max(4, mouthW * 0.92);
+      let toothH;
+      if (isBreathy || effectiveKey === "k") {
+        toothH = Math.max(3, mouthRy * 0.95);
+      } else {
+        toothH = Math.max(4, mouthRy * 0.3);
+      }
+      c.fillStyle = "#ffffff";
+      // Top teeth
+      c.fillRect(-toothW / 2, -mouthRy, toothW, toothH);
+      // Bottom teeth
+      c.fillRect(-toothW / 2, mouthRy - toothH, toothW, toothH);
+
+      c.restore(); // Restore clip mask
+
+      // Lips outline
+      mouthPath();
+      c.strokeStyle = "#000";
+      c.lineWidth = 3;
+      c.stroke();
+
+    } else {
+      // Smooth Closed State: draw a clean rounded horizontal line for lips
+      c.beginPath();
+      c.moveTo(-mouthRx, 0);
+      c.lineTo(mouthRx, 0);
+      c.strokeStyle = "#000";
+      c.lineWidth = 3.5;
+      c.lineCap = "round";
+      c.stroke();
+    }
+
+    c.restore(); // Restore mouth transform
+
+    // UI labels updates
     visualFormantsEl.innerHTML = `F1: ${Math.round(f1)}&nbsp;&nbsp;F2: ${Math.round(f2)}&nbsp;&nbsp;F3: ${Math.round(f3)}`;
     visualPhoneEl.textContent = phone ? `Current Phone: ${phone}` : "Current Phone: None";
   }
@@ -2104,7 +2213,7 @@ if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
 
       drawVisual(f[0], f[1], f[2], cur.key, cur.key);
     } else {
-      drawVisual(0, 0, 0, cur ? cur.key : null, cur ? cur.key : null);
+      drawVisual(0, 0, 0, cur ? cur.key : "rest", cur ? cur.key : "rest");
     }
 
     visualAnimId = requestAnimationFrame(animTick);
