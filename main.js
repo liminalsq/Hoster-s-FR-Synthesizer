@@ -170,8 +170,8 @@ const stopPreview = () => {
 
     // --- NASALS & PLOSIVES/FRICATIVES ---
     n:  { f: [250,  1250, 2450, 3400, 4400, 5400], voiced: true, nasal: true, noiseAmp: 1 },
-    m:  { f: [200,  1050, 2050, 3300, 4300, 5300], voiced: true, nasal: true, noiseAmp: 1 },
-    b:  { f: [305,  1100, 2050, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
+    m:  { f: [270,  1270, 2130, 3300, 4300, 5300], voiced: true, nasal: true, noiseAmp: 1 },
+    b:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
     p:  { f: [950,  1750, 2650, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
     f:  { f: [1150, 2950, 4950, 5900, 6800, 7800], breathy: true, voiced: false, noiseAmp: 1 },
     v:  { f: [255,  2100, 3255, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
