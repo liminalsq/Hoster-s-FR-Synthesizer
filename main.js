@@ -19,7 +19,7 @@
 
   // --- Experimental / for-fun options ---
   let disableFormantFilter = false; // bypass the biquad formant filters
-  let oscType = "rosenburg";        // rosenburg(default) | sawtooth | square | custom
+  let oscType = "rosenberg";        // rosenberg(default) | sawtooth | square | custom
   let customOscSample = null;       // decoded Float32Array for custom waveform
   let customOscSampleRate = 44100;
 
@@ -174,7 +174,7 @@ const stopPreview = () => {
     b:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
     p:  { f: [950,  1750, 2650, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
     f:  { f: [1150, 2950, 4950, 5900, 6800, 7800], breathy: true, voiced: false, noiseAmp: 1 },
-    v:  { f: [255,  2100, 3255, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
+    v:  { f: [220,  1100, 2080, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.125, amp: 0.575 },
     th: { f: [1150, 2150, 3450, 4500, 5500, 6500], breathy: true, voiced: false, noiseAmp: 1 },
     dh: { f: [270,  1290, 2540, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 0.25, amp: 0.55 },
     sh: { f: [2450, 3050, 3950, 4900, 5900, 6900], breathy: true, voiced: false, noiseAmp: 1 },
@@ -605,7 +605,7 @@ const stopPreview = () => {
   // Create an oscillator configured per the selected experimental oscillator type.
   const createSelectedOsc = (ctx) => {
     const osc = ctx.createOscillator();
-    const t = oscType || "rosenburg";
+    const t = oscType || "rosenberg";
     if (t === "sawtooth") osc.type = "sawtooth";
     else if (t === "square") osc.type = "square";
     else if (t === "custom" && customOscSample) {
@@ -669,18 +669,21 @@ const stopPreview = () => {
     const numFormants = 3;
     const voiceFilters = [];
     const voiceGains = [];
-    for (let i = 0; i < numFormants; i++) {
-      const f = ctx.createBiquadFilter();
-      f.type = "bandpass";
-      f.Q.value = 15;
-      f.frequency.value = 0;
-      const g = ctx.createGain();
-      g.gain.value = 1; // normal full vowel energy
-      f.connect(g);
-      g.connect(master);
-      voiceFilters.push(f);
-      voiceGains.push(g);
-    }
+
+    if (!disableFormantFilter) {
+      for (let i = 0; i < numFormants; i++) {
+        const f = ctx.createBiquadFilter();
+        f.type = "bandpass";
+        f.Q.value = 15;
+        f.frequency.value = 0;
+        const g = ctx.createGain();
+        g.gain.value = 1; // normal full vowel energy
+        f.connect(g);
+        g.connect(master);
+        voiceFilters.push(f);
+        voiceGains.push(g);
+      }
+    };
 
     // Feature 4: Sine wave for bass/timbre backing the pulse train, affected by formant filters
     const bassOsc = ctx.createOscillator();
@@ -688,20 +691,26 @@ const stopPreview = () => {
     const bassGain = ctx.createGain();
     bassGain.gain.value = 0.1; // subtle bass
     // Route bass through formant filters for integration
-    for (let idx = 0; idx < numFormants; idx++) {
-      bassGain.connect(voiceFilters[idx]);
+
+    if (!disableFormantFilter) {
+      for (let idx = 0; idx < numFormants; idx++) {
+        bassGain.connect(voiceFilters[idx]);
+      }
     }
     // Will set frequency and start/stop later
 
     // shared noise filters for breathy vowel/noise path
     const sharedNoiseFilters = [];
-    for (let i = 0; i < numFormants; i++) {
-      const f = ctx.createBiquadFilter();
-      f.type = "bandpass";
-      f.Q.value = 15;
-      f.frequency.value = 0;
-      f.connect(master);
-      sharedNoiseFilters.push(f);
+    
+    if (!disableFormantFilter) {
+      for (let i = 0; i < numFormants; i++) {
+        const f = ctx.createBiquadFilter();
+        f.type = "bandpass";
+        f.Q.value = 15;
+        f.frequency.value = 0;
+        f.connect(master);
+        sharedNoiseFilters.push(f);
+      }
     }
 
     // persistent vibrato LFO
@@ -1093,7 +1102,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
             real[n] = 1 / (n * n);
           }
 
-          if (oscType === "rosenburg"){
+          if (oscType === "rosenberg"){
             const glottalWave = ctx.createPeriodicWave(real, imag);
             currentOsc.setPeriodicWave(glottalWave);
           } else {
@@ -1321,7 +1330,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
       <div style="margin-top:6px; font-size:11px;">
         <label>Oscillator / Glottal pulse:
           <select id="oscTypeSel" style="width:100%; margin-top:2px;">
-            <option value="rosenburg">Rosenburg/Default</option>
+            <option value="rosenberg">Rosenberg/Default</option>
             <option value="sawtooth">Sawtooth</option>
             <option value="square">Square</option>
             <option value="custom">Custom</option>
