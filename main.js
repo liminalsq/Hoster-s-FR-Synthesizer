@@ -152,7 +152,7 @@ const stopPreview = () => {
     ee:  { f: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
     I:   { f: [440, 1200, 2700, 3500, 4500, 5500], voiced: true },
     o:   { f: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
-    u:   { f: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
+    u:   { f: [350, 1250, 2200, 3300, 4300, 5300], voiced: true },
     y:   { f: [300, 2000, 2800, 3600, 4600, 5600], voiced: true },
     w:   { f: [290, 610, 2150, 3300, 4300, 5300], voiced: true },
     r:   { f: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
@@ -165,14 +165,14 @@ const stopPreview = () => {
     zh: { f: [270, 1840, 2750, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.2 },
     t:  { f: [400,  1600, 2600, 4900, 5900, 6900], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
     d:  { f: [200,  1600, 2600, 3800, 4800, 5800], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: 0.2, morphs: false },
-    k:  { f: [1150, 1950, 3150, 4100, 5100, 6100], burst: true, short: true, voiced: false, noiseAmp: 1 },
+    k:  { f: [300, 1990, 2850, 4100, 5100, 6100], burst: true, short: true, voiced: false, noiseAmp: 1 },
     g:  { f: [200,  1990, 2850, 3600, 4600, 5600], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.3, morphs: false },
 
     // --- NASALS & PLOSIVES/FRICATIVES ---
     n:  { f: [250,  1250, 2450, 3400, 4400, 5400], voiced: true, nasal: true, noiseAmp: 1 },
     m:  { f: [270,  1270, 2130, 3300, 4300, 5300], voiced: true, nasal: true, noiseAmp: 1 },
-    b:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.25, morphs: false },
-    p:  { f: [950,  1750, 2650, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
+    b:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.35, morphs: false },
+    p:  { f: [400,  1100, 2150, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
     f:  { f: [1150, 2950, 4950, 5900, 6800, 7800], breathy: true, voiced: false, noiseAmp: 1 },
     v:  { f: [220,  1100, 2080, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.225, amp: 0.575 },
     th: { f: [1150, 2150, 3450, 4500, 5500, 6500], breathy: true, voiced: false, noiseAmp: 1 },
@@ -1381,7 +1381,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
       <label style="margin-left:8px">Consonant Duration: <input type="number" id="consonantDuration" value="0.1" step="0.01" style="width:80px"/></label>
     </div>
     <div style="margin-top:6px">
-      <label>Gender Shift: <input type="range" id="genderShift" min="-100" max="100" value="0" style="width:200px"/></label>
+      <label>Gender Shift: <input type="range" id="genderShift" min="-150" max="150" value="0" style="width:200px"/></label>
       <span id="genderValue">0</span>
     </div>
     <div style="margin-top:6px">
@@ -2027,27 +2027,32 @@ prevSrc.onended = () => {
     const f3n = clamp((f3 - 2000) / 1500, 0, 1);
 
     // Downscaled mouth dimensions
-    const mouthScale = 0.75;
+    const mouthScale = 0.45;
 
     let targetMouthW, targetMouthH;
     if (isClosedMouth) {
       targetMouthW = 56 * mouthScale;
       targetMouthH = 2; // Flat target line height
     } else {
-      targetMouthW = (46 + 44 * f3n) * mouthScale;
-      targetMouthH = (40 + 44 * f1n) * mouthScale;
+      if (effectiveKey !== "w") {
+        targetMouthW = (46 + 44 * f3n) * mouthScale;
+        targetMouthH = (40 + 44 * f1n) * mouthScale;
+      } else {
+        targetMouthW = 5 * mouthScale;
+        targetMouthH = 5 * mouthScale;
+      }
     }
 
     // --- Smooth Height Interpolation (Lerp) ---
     // Adjust 0.2 to make closing faster (e.g. 0.3) or smoother/slower (e.g. 0.1)
-    currentMouthH += (targetMouthH - currentMouthH) * 0.2;
+    currentMouthH += (targetMouthH - currentMouthH) * 0.15;
 
     const mouthW = targetMouthW;
     const mouthH = currentMouthH;
 
     const mouthRx = mouthW / 2;
     const mouthRy = Math.max(0.5, mouthH / 2);
-    const tongueR = (8 + 20 * clamp((f2 - 700) / 1800, 0, 1)) * mouthScale;
+    let tongueR = (8 + 20 * clamp((f2 - 700) / 1800, 0, 1)) * mouthScale;
 
     // ==========================================
     // 1. EYES
@@ -2105,9 +2110,17 @@ prevSrc.onended = () => {
 
       // Tongue
       if (!isClosedMouth) {
-        const tongueY = mouthRy * 0.35;
+        let tongueY = mouthRy * 0.35;
+        let tongueRY = tongueR
+
+        if (effectiveKey === "l") {
+          tongueY = mouthRy * 0.01
+          tongueRY = 20
+          tongueR *= 2
+        }
+
         c.beginPath();
-        c.arc(0, tongueY, tongueR, 0, Math.PI * 2);
+        c.ellipse(0, tongueY, tongueR, tongueRY, 0, 0, Math.PI * 2);
         c.fillStyle = "#e03a3a";
         c.fill();
       }
@@ -2115,7 +2128,7 @@ prevSrc.onended = () => {
       // Teeth
       const toothW = Math.max(4, mouthW * 0.92);
       let toothH;
-      if (isBreathy || effectiveKey === "k") {
+      if (isBreathy || effectiveKey === "k" || effectiveKey === "g" || effectiveKey === "ng" || effectiveKey === "d" || effectiveKey === "t") {
         toothH = Math.max(3, mouthRy * 0.95);
       } else {
         toothH = Math.max(4, mouthRy * 0.3);
@@ -2261,8 +2274,8 @@ if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
 
   // consonant phoneme set (for consonant wrapping)
   const CONSONANT_PHONEMES = new Set([
-    "h","s","z","t","d","k","g","n","m","b","p","f","v","th","dh","sh","ch",
-    "j","ng","r","l","w","y"
+    "h","s","z","t","d","k","g","b","p","f","v","th","dh","sh","ch",
+    "j","ng","r","l",
   ]);
 
   // Parse the text input and build piano roll notes
