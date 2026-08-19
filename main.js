@@ -680,7 +680,7 @@ const stopPreview = () => {
 
       // In dynamic mode, /s/ anticipates an adjacent stop by fading to silence
       // before the stop begins. Standalone consonants keep their token duration.
-      if (dynamicMode && p.key === "s") {
+      if (dynamicMode && p.key === "s" || p.key === "z") {
         const nextKey = phonemeSeq[i + 1]?.key;
         p.dynamicFadeOut = nextKey === "t" || nextKey === "p" || nextKey === "d" || nextKey === "b";
       }
