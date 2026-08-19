@@ -243,10 +243,15 @@ const stopPreview = () => {
     "AY":["aa"],"EH":["e"],"ER":["er"],"EY":["ee"],"IH":["I"],
     "IY":["ee"],"OW":["o"],"OY":["oy"],"UH":["uh"],"UW":["u"],
     "B":["b"],"CH":["ch"],"D":["d"],"DH":["th"],"F":["f"],"G":["g"],
-    "HH":["h"],"JH":["j"],"K":["k"],"L":["l"],"M":["m"],"N":["n"],
+    "HH":["h"],"JH":["jh"],"K":["k"],"L":["l"],"M":["m"],"N":["n"],
     "NG":["ng"],"P":["p"],"R":["r"],"S":["s"],"SH":["sh"],"T":["t"],
     "TH":["th"],"V":["v"],"W":["w"],"Y":["y"],"Z":["z"],"ZH":["z"]
   };
+
+  const DYNAMIC_CONSONANTS = new Set([
+    "h", "n", "m", "s", "z", "t", "d", "r", "l", "b", "p", "k", "g",
+    "f", "v", "w", "y", "th", "dh", "sh", "ch", "jh", "ng"
+  ]);
 
   function arpabetToKeys(arpArr) {
     const out = [];
@@ -284,7 +289,7 @@ const stopPreview = () => {
     // Greedy fallback (multigraphs + contextual c/g)
     const multigraphRules = [
       ["tion", ["sh","uh","n"]], ["tch", ["ch"]], ["ch", ["ch"]], ["sh", ["sh"]],
-      ["ph", ["f"]], ["ng", ["ng"]], ["qu", ["k","w"]], ["wh", ["w"]],
+      ["ph", ["f"]], ["ng", ["ng"]], ["jh", ["jh"]], ["qu", ["k","w"]], ["wh", ["w"]],
       ["kn", ["n"]], ["wr", ["r"]], ["ee", ["ee"]], ["ea", ["ee"]],
       ["ai", ["aa"]], ["ay", ["aa"]], ["oa", ["o"]], ["oo", ["u"]],
       ["ow", ["o"]], ["oy", ["oy"]], ["au", ["aw"]], ["ough", ["o"]]
@@ -353,6 +358,7 @@ const stopPreview = () => {
   // Token formats:
   // phon <NOTE,duration>     (sets the current pitch)
   // phon <duration>          (reuses the current pitch)
+  // phon phon phon <NOTE,duration> (spaced phonemes share one timing)
   // phon <NOTE,duration,vibFreqHz,vibDelayBeats,vibFadeInBeats,vibSpeedBeats>
   // [settings] phon <NOTE,duration>  (brackets optional, applied to this phoneme only)
   //   fs   = formant scale (e.g. 0.5 male, 1.5 female)
@@ -391,14 +397,15 @@ const stopPreview = () => {
     if (bracket.vfao !== undefined) p.vibFadeOut = bracket.vfao;
   };
 
-    const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
+    const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+(?:\s+[a-zA-Z']+)*)\s*<\s*([^>]+)\s*>/gi;
     const result = [];
     let currentPitch = noteToFreq("C4");
     let match;
     while ((match = regex.exec(text)) !== null) {
       const bracket = parseBracketSettings(match[1] || "");
       const tokenRaw = match[2];
-      const token = tokenRaw.toLowerCase();
+      const token = tokenRaw.trim().toLowerCase();
+      const hasSeparatedPhonemes = /\s/.test(token);
       const fields = match[3].split(",").map(field => field.trim());
       const hasExplicitPitch = fields.length > 1;
       const pitchRaw = hasExplicitPitch ? fields[0] : null;
@@ -425,7 +432,7 @@ const stopPreview = () => {
       else dur = units * beatLen;
 
       // exact phoneme key match
-      if (phonemeMap[token]) {
+      if (!hasSeparatedPhonemes && phonemeMap[token]) {
         let p = { key: token, ...phonemeMap[token], d: dur, pitch };
         p.f = getAdjustedFormants(p.f);
         if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
@@ -437,13 +444,28 @@ const stopPreview = () => {
       }
 
       // otherwise treat token as a word and convert to phoneme keys
-      const parts = await textToPhonemes(tokenRaw);
+      const parts = hasSeparatedPhonemes
+        ? token.split(/\s+/)
+        : await textToPhonemes(tokenRaw);
       if (!parts || parts.length === 0) continue;
-      const partDur = dur / Math.max(1, parts.length);
-      for (const part of parts) {
+      let partDurations = parts.map(() => dur / Math.max(1, parts.length));
+      if (dynamicMode) {
+        const consonantCount = parts.filter(part => DYNAMIC_CONSONANTS.has(part.toLowerCase())).length;
+        const vowelCount = parts.length - consonantCount;
+        const consonantBudget = consonantCount * Math.min(consonantDuration, dur / Math.max(1, consonantCount));
+        const vowelDuration = vowelCount > 0
+          ? Math.max(0, dur - consonantBudget) / vowelCount
+          : 0;
+        partDurations = parts.map(part => DYNAMIC_CONSONANTS.has(part.toLowerCase())
+          ? Math.min(consonantDuration, dur / Math.max(1, consonantCount))
+          : vowelDuration);
+      }
+      for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+        const part = parts[partIndex];
+        const partDur = partDurations[partIndex];
         const key = part.toLowerCase();
         if (phonemeMap[key]) {
-          let p = { key, ...phonemeMap[key], d: partDur, pitch };
+          let p = { key, ...phonemeMap[key], d: partDur, pitch, dynamicDurationApplied: dynamicMode };
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -458,7 +480,7 @@ const stopPreview = () => {
             ng: "ng", er: "er", oy: "oy", aw: "aw"
           };
           const fm = (fallbackMap[key] || "rest");
-          let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch };
+          let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch, dynamicDurationApplied: dynamicMode };
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -655,14 +677,22 @@ const stopPreview = () => {
         // silence is implicit by delaying start
       }
 
-      // Dynamic mode: set consonant duration and extend next phoneme to preserve total duration
-      if (dynamicMode && !p.voiced && i + 1 < phonemeSeq.length) {
+      // Standalone consonant tokens have no word expansion to allocate their
+      // duration during parsing, so preserve the legacy fallback here.
+      if (dynamicMode && DYNAMIC_CONSONANTS.has(p.key) && !p.dynamicDurationApplied && i + 1 < phonemeSeq.length) {
         const originalD = p.d;
         if (originalD > consonantDuration) {
           p.d = consonantDuration;
           const extend = originalD - consonantDuration;
           phonemeSeq[i + 1].d += extend;
         }
+      }
+
+      // In dynamic mode, /s/ anticipates an adjacent t/d/p by fading down
+      // through its own duration instead of ending at full fricative volume.
+      if (dynamicMode && p.key === "s") {
+        const nextKey = phonemeSeq[i + 1]?.key;
+        p.dynamicFadeOut = nextKey === "t" || nextKey === "d" || nextKey === "p";
       }
 
       processedSeq.push(p);
@@ -842,7 +872,7 @@ const stopPreview = () => {
 
 
     // consonant noise generator with subtle fade-in
-      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1) => {
+      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0) => {
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
         // unvoiced fricatives/bursts => WHITE
@@ -852,8 +882,10 @@ const stopPreview = () => {
 
 
       const consonantGain = ctx.createGain();
+      const fadeEndRatio = fadeOutRatio > 0 ? fadeOutRatio : 1;
       consonantGain.gain.setValueAtTime(0, t);
-      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp, t + 0.01); // subtle fade-in over 0.01s
+      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp, t + Math.min(0.01, d)); // subtle fade-in over 0.01s
+      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp * fadeEndRatio, t + d);
       const consonantFilters = fArr.map(freq => {
         const bf = ctx.createBiquadFilter();
         bf.type = "bandpass";
@@ -918,7 +950,7 @@ const stopPreview = () => {
 
       // If current phoneme is consonant/unvoiced or purely breathy/burst -> produce consonant-filtered noise
       if (opt.breathy || opt.burst) {
-        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1);
+        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, opt.dynamicFadeOut ? 0.1 : 0);
         // If it's not voiced at all, we're done
         if (!voiced) return;
       }
@@ -1338,7 +1370,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
 
         // play consonant noise
         if (!p.voiced || mode === "whisper") {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1);
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, p.dynamicFadeOut ? 0.1 : 0);
         }
       }
 
