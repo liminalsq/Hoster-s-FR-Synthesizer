@@ -351,7 +351,8 @@ const stopPreview = () => {
   // parseInput async: supports grid types and uses textToPhonemes for words
   const parseInput = async (text, beatLen, gridType = "beats", stepsPerBeat = 4) => {
   // Token formats:
-  // phon <NOTE,duration>
+  // phon <NOTE,duration>     (sets the current pitch)
+  // phon <duration>          (reuses the current pitch)
   // phon <NOTE,duration,vibFreqHz,vibDelayBeats,vibFadeInBeats,vibSpeedBeats>
   // [settings] phon <NOTE,duration>  (brackets optional, applied to this phoneme only)
   //   fs   = formant scale (e.g. 0.5 male, 1.5 female)
@@ -390,22 +391,31 @@ const stopPreview = () => {
     if (bracket.vfao !== undefined) p.vibFadeOut = bracket.vfao;
   };
 
-    const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([\w#b]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?(?:\s*,\s*([\d.]+))?\s*>/gi;
+    const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
     const result = [];
+    let currentPitch = noteToFreq("C4");
     let match;
     while ((match = regex.exec(text)) !== null) {
       const bracket = parseBracketSettings(match[1] || "");
       const tokenRaw = match[2];
       const token = tokenRaw.toLowerCase();
-      const pitchRaw = match[3];
-      const units = parseFloat(match[4]);
+      const fields = match[3].split(",").map(field => field.trim());
+      const hasExplicitPitch = fields.length > 1;
+      const pitchRaw = hasExplicitPitch ? fields[0] : null;
+      const units = parseFloat(hasExplicitPitch ? fields[1] : fields[0]);
+      if (!Number.isFinite(units)) continue;
+      if (hasExplicitPitch) {
+        const parsedPitch = noteToFreq(pitchRaw);
+        if (Number.isFinite(parsedPitch)) currentPitch = parsedPitch;
+      }
+      const pitch = currentPitch;
 
       // Optional per-phoneme vibrato fields (beats-based):
-      // match[5]=vibFreqHz, match[6]=vibDelayBeats, match[7]=vibFadeInBeats, match[8]=vibSpeedBeats
-      const vibFreqHz = match[5] != null ? parseFloat(match[5]) : null;
-      const vibDelayBeats = match[6] != null ? parseFloat(match[6]) : null;
-      const vibFadeInBeats = match[7] != null ? parseFloat(match[7]) : null;
-      const vibSpeedBeats = match[8] != null ? parseFloat(match[8]) : null;
+      // fields[2]=vibFreqHz, fields[3]=vibDelayBeats, fields[4]=vibFadeInBeats, fields[5]=vibSpeedBeats
+      const vibFreqHz = fields[2] != null && fields[2] !== "" ? parseFloat(fields[2]) : null;
+      const vibDelayBeats = fields[3] != null && fields[3] !== "" ? parseFloat(fields[3]) : null;
+      const vibFadeInBeats = fields[4] != null && fields[4] !== "" ? parseFloat(fields[4]) : null;
+      const vibSpeedBeats = fields[5] != null && fields[5] !== "" ? parseFloat(fields[5]) : null;
 
       // compute duration from units based on grid type
       let dur = 0;
@@ -416,7 +426,7 @@ const stopPreview = () => {
 
       // exact phoneme key match
       if (phonemeMap[token]) {
-        let p = { key: token, ...phonemeMap[token], d: dur, pitch: noteToFreq(pitchRaw) };
+        let p = { key: token, ...phonemeMap[token], d: dur, pitch };
         p.f = getAdjustedFormants(p.f);
         if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -433,7 +443,7 @@ const stopPreview = () => {
       for (const part of parts) {
         const key = part.toLowerCase();
         if (phonemeMap[key]) {
-          let p = { key, ...phonemeMap[key], d: partDur, pitch: noteToFreq(pitchRaw) };
+          let p = { key, ...phonemeMap[key], d: partDur, pitch };
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -448,7 +458,7 @@ const stopPreview = () => {
             ng: "ng", er: "er", oy: "oy", aw: "aw"
           };
           const fm = (fallbackMap[key] || "rest");
-          let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch: noteToFreq(pitchRaw) };
+          let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch };
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -1709,7 +1719,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
 
     // Convert timeline to tokens.
     const tokens = [];
-    const restPitch = "C4";
+    let previousNoteNumber = null;
 
     const fmtDur = (x) => {
       // keep readable but not too long
@@ -1722,13 +1732,15 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
       if (durSec <= 0) continue;
       if (seg.noteNumber == null) {
         const durToken = midiDurationUnitsToToken(durSec, gridType, 60 / bpm, stepsPerBeat);
-        tokens.push(`rest <${restPitch},${fmtDur(durToken)}> `);
+        tokens.push(`rest <${fmtDur(durToken)}>`);
       } else {
 
         const noteName = midiNoteNumberToName(seg.noteNumber);
         const durToken = midiDurationUnitsToToken(durSec, gridType, 60 / bpm, stepsPerBeat);
         // phoneme is always 'a'
-        tokens.push(`a <${noteName},${fmtDur(durToken)}>`);
+        const pitchPart = seg.noteNumber === previousNoteNumber ? "" : `${noteName},`;
+        tokens.push(`a <${pitchPart}${fmtDur(durToken)}>`);
+        previousNoteNumber = seg.noteNumber;
       }
     }
 
@@ -1763,34 +1775,41 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
       }
 
       // Replace only pitches/durations while keeping existing phoneme keys.
-      // Token format: <phonemeKey> <pitchName,tokenDuration>
-      const existingTokens = (phonemeInputEl.value || "").split(/\s+/).filter(Boolean);
-      const midiTokens = midiText.split(/\s+/).filter(Boolean);
-
-      const parseToken = (tok) => {
-        // e.g. "a <G4,0.4>" or "rest <C4,1>"
-        const m = tok.match(/^([a-zA-Z']+)\s*<\s*([^,>\s]+)\s*,\s*([^>\s]+)\s*>$/);
-        if (!m) return null;
-        return { key: m[1], pitch: m[2], dur: m[3] };
+      // Both explicit <NOTE,duration> and inherited <duration> are accepted.
+      const parseTokens = (source) => {
+        const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
+        const parsed = [];
+        let match;
+        while ((match = regex.exec(source)) !== null) {
+          const fields = match[3].split(",").map(field => field.trim());
+          const hasPitch = fields.length > 1;
+          parsed.push({
+            prefix: match[1] || "",
+            key: match[2],
+            pitch: hasPitch ? fields[0] : null,
+            dur: hasPitch ? fields[1] : fields[0]
+          });
+        }
+        return parsed;
       };
 
-      const midiParsed = midiTokens.map(parseToken).filter(Boolean);
+      const midiParsed = parseTokens(midiText);
+      const existingTokens = parseTokens(phonemeInputEl.value || "");
       let midiIdx = 0;
 
       const outTokens = [];
-      for (const tok of existingTokens) {
-        const p = parseToken(tok);
+      for (const p of existingTokens) {
         if (!p) continue;
 
         const mp = midiParsed[midiIdx];
         // If we ran out of MIDI tokens, keep remaining original tokens.
         if (!mp) {
-          outTokens.push(tok);
+          outTokens.push(`${p.prefix}${p.key} <${p.pitch ? `${p.pitch},` : ""}${p.dur}>`);
           continue;
         }
 
         // Only replace pitches/durations for tokens that actually look like phoneme+pitch.
-        outTokens.push(`${p.key} <${mp.pitch},${mp.dur}>`);
+        outTokens.push(`${p.prefix}${p.key} <${mp.pitch ? `${mp.pitch},` : ""}${mp.dur}>`);
         midiIdx++;
       }
 
@@ -2193,17 +2212,21 @@ prevSrc.onended = () => {
     if (cur && cur.f) {
       let f = cur.f.slice();
 
-      // Only smooth toward a target when formant morphing is enabled, using the
-      // same morphTime window the synthesis engine uses at the end of each phone.
+      // Match synthesis timing: morphTo spans the full phone; adjacent phones
+      // use the configured morphTime window at the end of the current phone.
       const morphEnabled = !!container.querySelector("#enableMorph").checked;
       const morphTime = Math.max(0, parseFloat(container.querySelector("#morphTime").value) || 0);
 
-  let target = null;
-  if (morphEnabled && morphTime > 0) {
-    if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
-          // Diphthong/glide: morph toward this phoneme's own target.
+      let target = null;
+      let morphStart = curStart + Math.max(0, cur.d - morphTime);
+      let morphDuration = morphTime;
+      if (morphEnabled) {
+        if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
+          // Diphthong/glide: match synthesis and morph across the full phone.
           target = cur.morphTo;
-        } else {
+          morphStart = curStart;
+          morphDuration = cur.d;
+        } else if (morphTime > 0) {
           // Otherwise glide toward the next voiced phoneme's formants.
           for (let j = curIndex + 1; j < visualSeq.length; j++) {
             const n = visualSeq[j];
@@ -2213,11 +2236,9 @@ prevSrc.onended = () => {
       }
 
       if (target) {
-        // Windowed transition over `morphTime` at the end of the phoneme.
-        const dur = Math.max(0.0001, morphTime);
-        const morphStart = curStart + Math.max(0, cur.d - morphTime);
+        const transitionDuration = Math.max(0.0001, morphDuration);
         if (elapsed >= morphStart) {
-          const seg = clamp((elapsed - morphStart) / dur, 0, 1);
+          const seg = clamp((elapsed - morphStart) / transitionDuration, 0, 1);
           // const prog = 1 - Math.pow(1 - seg, 2); // gentle ease-out for smoother motion
          const prog = seg * seg * (3 - 2 * seg);
           f = f.map((v, i) => v + (target[i] - v) * prog);
@@ -2281,14 +2302,19 @@ prevSrc.onended = () => {
   // Parse the text input and build piano roll notes
   function parsePianoRollFromText(text, bpm, gridType, stepsPerBeat) {
     const beatLen = 60 / bpm;
-    const regex = /([a-zA-Z']+)\s*<\s*([\w#b]+)\s*,\s*([\d.]+)/gi;
+    const regex = /([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
     const notes = [];
+    let currentPitchName = "C4";
     let match;
     let startBeat = 0;
     while ((match = regex.exec(text)) !== null) {
       const phoneme = match[1].toLowerCase();
-      const pitchRaw = match[2];
-      const units = parseFloat(match[3]);
+      const fields = match[2].split(",").map(field => field.trim());
+      const hasExplicitPitch = fields.length > 1;
+      if (hasExplicitPitch) currentPitchName = fields[0];
+      const pitchRaw = currentPitchName;
+      const units = parseFloat(hasExplicitPitch ? fields[1] : fields[0]);
+      if (!Number.isFinite(units)) continue;
 
       let durSec = 0;
       if (gridType === "beats") durSec = units * beatLen;
@@ -2845,18 +2871,21 @@ prevSrc.onended = () => {
 
     let tokens = [];
     let prevEndBeat = 0;
+    let previousPitchName = null;
     for (const note of pianoRollNotes) {
       // Add rest if gap
       if (note.startBeat > prevEndBeat + 0.01) {
         const gap = note.startBeat - prevEndBeat;
         let gapUnits = gap;
         if (gridType === "steps") gapUnits = gap * stepsPerBeat;
-        tokens.push(`rest <C4,${gapUnits.toFixed(3)}>`);
+        tokens.push(`rest <${gapUnits.toFixed(3)}>`);
       }
 
       let units = note.durBeats;
       if (gridType === "steps") units = note.durBeats * stepsPerBeat;
-      tokens.push(`${note.phoneme} <${note.pitchName},${units.toFixed(3)}>`);
+      const pitchPart = note.pitchName === previousPitchName ? "" : `${note.pitchName},`;
+      tokens.push(`${note.phoneme} <${pitchPart}${units.toFixed(3)}>`);
+      previousPitchName = note.pitchName;
       prevEndBeat = note.startBeat + note.durBeats;
     }
 
