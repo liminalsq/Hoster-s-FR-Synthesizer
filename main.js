@@ -902,8 +902,8 @@ const stopPreview = () => {
 
     const scheduleWhisperFormants = (t, d, f, opt, nextVoiced, isRunStart) => {
       if (sharedNoiseFilters.length === 0) return;
-      const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORMANTS;
-      const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
+      const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORMANTS;
+      const hasVoicedTarget = voiceFilters.length > 0 && morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
       const morphStart = t + Math.max(0, d - morphTime);
       const morphEnd = t + d;
 
@@ -966,7 +966,7 @@ const stopPreview = () => {
       // (bypasses morphTime). Mirrors the main synthesis loop for consistency.
       // Note: phonemeMap entries carry 6 formants (F4-F6 ignored by the 3-filter
       // engine), so accept >= numFormants here.
-const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORMANTS;
+const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORMANTS;
 
       // if target is nasal, schedule a nasal transition instead of morphing formants toward nasal targets
       const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
@@ -1035,7 +1035,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
             } catch (e) {}
 
         }
-      } else {
+      } else if (voiceFilters.length > 0) {
         // no voiced target (or morph disabled) -> set filters to current f immediately
         for (let idx = 0; idx < numFormants; idx++) {
           const val = (f && f[idx]) || 0;
@@ -1119,8 +1119,10 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
       oscGain.gain.linearRampToValueAtTime(0.89 * amp, t + fadeTime);
       oscGain.gain.setValueAtTime(0.89 * amp, t + d - fadeTime);
       oscGain.gain.linearRampToValueAtTime(0, t + d);
-      for (let idx = 0; idx < numFormants; idx++) {
-        osc.connect(oscGain).connect(voiceFilters[idx]);
+      if (voiceFilters.length > 0) {
+        for (const filter of voiceFilters) osc.connect(oscGain).connect(filter);
+      } else {
+        osc.connect(oscGain).connect(master);
       }
 
 // If breathy component, route a noise source via sharedNoiseFilters as well
@@ -1129,7 +1131,11 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
         // voiced-ish breathy component/aspiration => PINK
         const breathyNoiseAmp = (opt.noiseAmp ?? 1);
         noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.05 * breathyNoiseAmp });
-        for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
+        if (sharedNoiseFilters.length > 0) {
+          for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
+        } else {
+          noiseSrc.connect(master);
+        }
         noiseSrc.start(t);
         noiseSrc.stop(t + d + 0.005);
       }
@@ -1183,6 +1189,9 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
           whisperRunStart = false;
         }
       } else if (p.voiced) {
+        if (p.burst) {
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, p.dynamicFadeOut ? 0.1 : 0);
+        }
         const isRunStart = !currentOsc;
         if (!currentOsc) {
           // start new oscillator for voiced sequence
@@ -1212,8 +1221,10 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
           oscGain.gain.setValueAtTime(0, t);
           oscGain.gain.linearRampToValueAtTime(0.89 * amp, t + fadeTime);
           currentAmp = amp;
-          for (let idx = 0; idx < numFormants; idx++) {
-            currentOsc.connect(oscGain).connect(voiceFilters[idx]);
+          if (voiceFilters.length > 0) {
+            for (const filter of voiceFilters) currentOsc.connect(oscGain).connect(filter);
+          } else {
+            currentOsc.connect(oscGain).connect(master);
           }
           currentOsc.start(t);
         }
@@ -1297,8 +1308,8 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
         // (bypasses morphTime). This provides diphthong-style transitions like "ew".
 // Note: phonemeMap entries carry 6 formants (F4-F6 ignored by the 3-filter
         // engine), so accept all 6 here.
-        const hasMorphTo = morphEnabled && p.morphTo && p.morphTo.length >= MAP_FORMANTS;
-        const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
+        const hasMorphTo = voiceFilters.length > 0 && morphEnabled && p.morphTo && p.morphTo.length >= MAP_FORMANTS;
+        const hasVoicedTarget = voiceFilters.length > 0 && morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
         const targetIsNasal = hasVoicedTarget && !!nextVoiced.nasal;
         const morphStart = t + Math.max(0, p.d - morphTime);
         const morphEnd = t + p.d;
@@ -1335,7 +1346,7 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
             holdThenRampFreq(voiceFilters[idx].frequency, t, isRunStart, curVal, morphStart, nextVal, morphEnd);
             holdThenRampFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal, morphStart, nextVal, morphEnd);
           }
-        } else {
+        } else if (voiceFilters.length > 0) {
           for (let idx = 0; idx < numFormants; idx++) {
             const val = (p.f && p.f[idx]) || 0;
             holdFreq(voiceFilters[idx].frequency, t, isRunStart, val);
@@ -1350,7 +1361,11 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
           // voiced-ish breathy component/aspiration => PINK
           const breathyNoiseAmp = (p.noiseAmp ?? 1);
           noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.05 * breathyNoiseAmp });
-          for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
+          if (sharedNoiseFilters.length > 0) {
+            for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
+          } else {
+            noiseSrc.connect(master);
+          }
           noiseSrc.start(t);
           noiseSrc.stop(t + p.d + 0.005);
         }
@@ -1387,6 +1402,40 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
 
     master.connect(ctx.destination);
     return await ctx.startRendering();
+  };
+
+  const previewPhoneme = async (key) => {
+    const source = phonemeMap[key];
+    if (!source || key === "rest") return;
+
+    const duration = 0.35;
+    const phoneme = {
+      key,
+      ...source,
+      d: duration,
+      pitch: noteToFreq("C4"),
+      f: getAdjustedFormants(source.f),
+      morphTo: source.morphTo ? getAdjustedFormants(source.morphTo) : undefined
+    };
+    const offlineCtx = new OfflineAudioContext(1, Math.ceil(duration * sampleRate) + 128, sampleRate);
+    const rendered = await synthesize(offlineCtx, [phoneme], "voiced", 0, 0, 0, 0.05, true, 0, false, false, 0.1);
+
+    stopPreview();
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    previewBuf = actx.createBuffer(1, rendered.length, sampleRate);
+    previewBuf.getChannelData(0).set(rendered.getChannelData(0));
+    prevSrc = actx.createBufferSource();
+    prevSrc.buffer = previewBuf;
+    prevSrc.connect(actx.destination);
+    prevSrc.onended = () => {
+      prevSrc = null;
+      previewBuf = null;
+      if (actx) {
+        try { actx.close(); } catch (e) {}
+        actx = null;
+      }
+    };
+    prevSrc.start();
   };
 
   // UI: minimal container (controls same as previous iterations)
@@ -2710,6 +2759,53 @@ prevSrc.onended = () => {
     return durBeats;
   }
 
+  function attachPhonemeBank() {
+    if (!pianoRollPanelEl || pianoRollPanelEl.querySelector("#prOpenPhoneBank")) return;
+
+    const openButton = document.createElement("button");
+    openButton.id = "prOpenPhoneBank";
+    openButton.className = "pe-btn";
+    openButton.type = "button";
+    openButton.textContent = "Open Phone Bank";
+    openButton.style.display = "block";
+
+    const frame = document.createElement("div");
+    frame.id = "prPhoneBankFrame";
+    frame.style.cssText = "display:none;margin-top:8px;padding:6px;border:1px solid #aaa;background:#fafafa;";
+    frame.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;font-weight:bold;">
+      <span>Phone Bank</span><button type="button" id="prClosePhoneBank" class="pe-btn" style="margin:0;padding:2px 6px;">Close</button>
+    </div><div id="prPhoneBankButtons" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;"></div>`;
+
+    const buttons = frame.querySelector("#prPhoneBankButtons");
+    for (const key of Object.keys(phonemeMap)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = key;
+      button.title = `Preview ${key}`;
+      button.style.cssText = "padding:3px 2px;font-family:monospace;font-size:11px;";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await previewPhoneme(key);
+        } catch (error) {
+          console.error(`Failed to preview phoneme ${key}:`, error);
+        } finally {
+          button.disabled = false;
+        }
+      });
+      buttons.appendChild(button);
+    }
+
+    openButton.addEventListener("click", () => {
+      frame.style.display = frame.style.display === "none" ? "block" : "none";
+    });
+    frame.querySelector("#prClosePhoneBank").addEventListener("click", () => {
+      frame.style.display = "none";
+    });
+
+    pianoRollPanelEl.append(openButton, frame);
+  }
+
   // Render/update the left panel based on the current selection.
   // - No selection            -> piano-roll settings (consonant wrapper toggle, snap, refresh).
   // - Single selected note    -> note editor (phoneme, start/end split when a consonant+vowel is
@@ -2734,6 +2830,7 @@ prevSrc.onended = () => {
       h += `<button id="prRefreshBtn" class="pe-btn">Refresh from text</button>`;
       h += `<div class="pe-hint">Click to add note • drag to move • drag edges to resize • Shift+Click/Drag to multi-select • Delete to remove • Double-click to edit phoneme</div>`;
       pianoRollPanelEl.innerHTML = h;
+      attachPhonemeBank();
 
       const wrapChk = pianoRollPanelEl.querySelector("#prConsonantWrap");
       if (wrapChk) wrapChk.addEventListener("change", (e) => {
@@ -2758,6 +2855,7 @@ prevSrc.onended = () => {
       h += `<div class="pe-total">${selectedNoteIndexes.size} notes selected</div>`;
       h += `<button id="prDeselect" class="pe-btn">Deselect</button>`;
       pianoRollPanelEl.innerHTML = h;
+      attachPhonemeBank();
       const ds = pianoRollPanelEl.querySelector("#prDeselect");
       if (ds) ds.addEventListener("click", () => {
         selectedNoteIndexes.clear();
@@ -2840,6 +2938,7 @@ prevSrc.onended = () => {
     h += `<button id="prDelete" class="pe-btn">Delete</button>`;
     h += `<button id="prDeselect" class="pe-btn">Deselect</button>`;
     pianoRollPanelEl.innerHTML = h;
+    attachPhonemeBank();
 
     const parseBeatFromUnits = (units, gridType2, steps2) => {
       if (gridType2 === "steps") return units / steps2;
@@ -3307,5 +3406,6 @@ prevSrc.onended = () => {
 
   // Initial draw
   drawPianoRoll();
+  updatePianoRollPanel();
 
 })();
