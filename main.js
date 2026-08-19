@@ -40,7 +40,7 @@ const stopPreview = () => {
       prevSrc = null;
     }
     previewBuf = null;
-    //if (typeof stopVisualAnim === "function") stopVisualAnim();
+    setVisualIdle();
     if (actx) {
       try { if (actx.state === "running") actx.close(); } catch (e) {}
       actx = null;
@@ -171,7 +171,7 @@ const stopPreview = () => {
     g:  { f: [200,  1990, 2850, 3600, 4600, 5600], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.3, morphs: false },
 
     // --- NASALS & PLOSIVES/FRICATIVES ---
-    n:  { f: [250,  1250, 2450, 3400, 4400, 5400], voiced: true, nasal: true, noiseAmp: 1 },
+    n:  { f: [270,  1340, 2470, 3400, 4400, 5400], voiced: true, nasal: true, noiseAmp: 1 },
     m:  { f: [270,  1270, 2130, 3300, 4300, 5300], voiced: true, nasal: true, noiseAmp: 1 },
     b:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.35, morphs: false },
     p:  { f: [400,  1100, 2150, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
@@ -659,8 +659,8 @@ const stopPreview = () => {
       const prev = processedSeq.length > 0 ? processedSeq[processedSeq.length - 1] : null;
       const hasPrevVoiced = prev && prev.voiced;
 
-      // Feature 3: If b or p and no previous voiced, prepend m
-      if ((p.key === 'b' || p.key === 'p') && !hasPrevVoiced) {
+      // Feature 3: If b and no previous voiced, prepend m
+      if (p.key === 'b' && !hasPrevVoiced) {
         // Prepend a brief m, but keep it quieter to avoid loud noise bursts.
         // 40% quieter than normal m -> amp scale 0.6
         const mDur = Math.min(0.05, p.d * 0.1); // short m
@@ -679,22 +679,11 @@ const stopPreview = () => {
         // silence is implicit by delaying start
       }
 
-      // Standalone consonant tokens have no word expansion to allocate their
-      // duration during parsing, so preserve the legacy fallback here.
-      if (dynamicMode && DYNAMIC_CONSONANTS.has(p.key) && !p.dynamicDurationApplied && i + 1 < phonemeSeq.length) {
-        const originalD = p.d;
-        if (originalD > consonantDuration) {
-          p.d = consonantDuration;
-          const extend = originalD - consonantDuration;
-          phonemeSeq[i + 1].d += extend;
-        }
-      }
-
-      // In dynamic mode, /s/ anticipates an adjacent t/d/p by fading down
-      // through its own duration instead of ending at full fricative volume.
+      // In dynamic mode, /s/ anticipates an adjacent stop by fading to silence
+      // before the stop begins. Standalone consonants keep their token duration.
       if (dynamicMode && p.key === "s") {
         const nextKey = phonemeSeq[i + 1]?.key;
-        p.dynamicFadeOut = nextKey === "t" || nextKey === "d" || nextKey === "p";
+        p.dynamicFadeOut = nextKey === "t" || nextKey === "p" || nextKey === "d" || nextKey === "b";
       }
 
       processedSeq.push(p);
@@ -874,7 +863,7 @@ const stopPreview = () => {
 
 
     // consonant noise generator with subtle fade-in
-      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0) => {
+      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0, fadeToSilence = false, fadeInRatio = 0) => {
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
         // unvoiced fricatives/bursts => WHITE
@@ -885,9 +874,20 @@ const stopPreview = () => {
 
       const consonantGain = ctx.createGain();
       const fadeEndRatio = fadeOutRatio > 0 ? fadeOutRatio : 1;
+      const fadeInDuration = fadeInRatio > 0
+        ? d * fadeInRatio
+        : fadeToSilence
+          ? Math.min(0.01, d * 0.05)
+          : Math.min(0.01, d);
       consonantGain.gain.setValueAtTime(0, t);
-      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp, t + Math.min(0.01, d)); // subtle fade-in over 0.01s
-      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp * fadeEndRatio, t + d);
+      consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp, t + fadeInDuration); // subtle fade-in over 0.01s
+      if (fadeToSilence) {
+        const fadeEnd = t + d * 0.95;
+        consonantGain.gain.linearRampToValueAtTime(0, fadeEnd);
+        consonantGain.gain.setValueAtTime(0, t + d);
+      } else {
+        consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp * fadeEndRatio, t + d);
+      }
       const consonantFilters = fArr.map(freq => {
         const bf = ctx.createBiquadFilter();
         bf.type = "bandpass";
@@ -923,7 +923,7 @@ const stopPreview = () => {
       }
     };
 
-    const playWhisperNoise = (t, d, f, opt = {}) => {
+    const playWhisperNoise = (t, d, f, opt = {}, fadeInRatio = 0) => {
       if (d <= 0) return;
       const noiseAmp = opt.noiseAmp ?? 1;
       const src = ctx.createBufferSource();
@@ -931,7 +931,8 @@ const stopPreview = () => {
       const gain = ctx.createGain();
       const amp = (opt.amp ?? 0.9) * noiseAmp;
       gain.gain.setValueAtTime(0, t);
-      gain.gain.linearRampToValueAtTime(amp, t + Math.min(0.01, d));
+      const fadeInDuration = fadeInRatio > 0 ? d * fadeInRatio : Math.min(0.01, d);
+      gain.gain.linearRampToValueAtTime(amp, t + fadeInDuration);
       gain.gain.setValueAtTime(amp, t + Math.max(0, d - 0.01));
       gain.gain.linearRampToValueAtTime(0, t + d);
       src.connect(gain);
@@ -952,7 +953,7 @@ const stopPreview = () => {
 
       // If current phoneme is consonant/unvoiced or purely breathy/burst -> produce consonant-filtered noise
       if (opt.breathy || opt.burst) {
-        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, opt.dynamicFadeOut ? 0.1 : 0);
+        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, opt.key === "s" ? 0.5 : 0);
         // If it's not voiced at all, we're done
         if (!voiced) return;
       }
@@ -1187,12 +1188,12 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
           whisperRunStart = true;
         } else {
           scheduleWhisperFormants(t, p.d, p.f, p, nextVoiced, whisperRunStart);
-          playWhisperNoise(t, p.d, p);
+          playWhisperNoise(t, p.d, p, p.key === "s" ? 0.5 : 0);
           whisperRunStart = false;
         }
       } else if (p.voiced) {
         if (p.burst) {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, p.dynamicFadeOut ? 0.1 : 0);
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0);
         }
         const isRunStart = !currentOsc;
         if (!currentOsc) {
@@ -1387,7 +1388,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
 
         // play consonant noise
         if (!p.voiced || mode === "whisper") {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, p.dynamicFadeOut ? 0.1 : 0);
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0);
         }
       }
 
@@ -1432,6 +1433,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
     prevSrc.onended = () => {
       prevSrc = null;
       previewBuf = null;
+      setVisualIdle();
       if (actx) {
         try { actx.close(); } catch (e) {}
         actx = null;
@@ -2067,7 +2069,7 @@ prevSrc.onended = () => {
           // natural-end cleanup: free shared preview state so a new preview can start
           prevSrc = null;
           previewBuf = null;
-          //if (typeof stopVisualAnim === "function") stopVisualAnim();
+          setVisualIdle();
           if (actx) {
             try { actx.close(); } catch (e) {}
             actx = null;
@@ -2339,9 +2341,19 @@ prevSrc.onended = () => {
     }
   }
 
+  function setVisualIdle() {
+    visualSeq = [];
+    drawVisual(0, 0, 0, null, "rest");
+  }
+
   // Animation tick: find the currently-playing phoneme and update the mouth.
   function animTick() {
-    const elapsed = actx ? actx.currentTime - visualStartTime : 0;
+    if (!actx) {
+      setVisualIdle();
+      visualAnimId = requestAnimationFrame(animTick);
+      return;
+    }
+    const elapsed = actx.currentTime - visualStartTime;
     let t = 0;
     let cur = null;
     let curStart = 0;
@@ -2441,7 +2453,7 @@ prevSrc.onended = () => {
     const duration = audioBuffer.duration;
 
     const cleanup = () => {
-      stopVisualAnim();
+      setVisualIdle();
       for (const track of stream.getTracks()) track.stop();
       try { source.stop(); } catch (e) {}
       try { exportCtx.close(); } catch (e) {}
