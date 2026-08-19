@@ -183,30 +183,30 @@ const stopPreview = () => {
 
     // --- ADDED PHONES & DIPHTHONGS ---
     er: { f: [550, 1200, 2450, 3300, 4300, 5300], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
-    j:  { f: [450, 1550, 2550, 3600, 4600, 5600], voiced: true, breathy: true, noiseAmp: 0.25 },
+    jh:  { f: [260, 1800, 2820, 3600, 4600, 5600], voiced: true, breathy: true, amp: 0.8, noiseAmp: 0.15 },
     ng: { f: [200, 850,  1950, 3300, 4300, 5300], voiced: true, nasal: true },
 
     oy: { f: [600, 850,  2550, 3400, 4400, 5400], morphTo: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
     ow: { f: [600, 1000, 2600, 3400, 4400, 5400], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
     ou: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
-    ol: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    ol: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
 
     ay: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
     aw: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
     ar: { f: [700, 1220, 2600, 3500, 4500, 5500], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
-    al: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    al: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
     aee:{ f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
 
     ew: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
     ey: { f: [500, 2300, 3000, 3600, 4600, 5600], morphTo: [300, 2000, 2800, 3600, 4600, 5600], voiced: true },
-    el: { f: [500, 2500, 3000, 3700, 4700, 5700], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    el: { f: [500, 2500, 3000, 3700, 4700, 5700], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
 
     uw: { f: [325, 700,  2530, 3300, 4300, 5300], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
-    ul: { f: [325, 700,  2530, 3300, 4300, 5300], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    ul: { f: [325, 700,  2530, 3300, 4300, 5300], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
     ur: { f: [320, 700,  2530, 3300, 4300, 5300], morphTo: [420, 1300, 1700, 3200, 4300, 5300], voiced: true },
 
     iw: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
-    il: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [500, 820,  2400, 3500, 4500, 5500], voiced: true },
+    il: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
     ir: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [420, 1300, 1700, 3200, 4300, 5300], voiced: true },
     iy: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
 
@@ -2198,9 +2198,9 @@ prevSrc.onended = () => {
       const morphEnabled = !!container.querySelector("#enableMorph").checked;
       const morphTime = Math.max(0, parseFloat(container.querySelector("#morphTime").value) || 0);
 
-let target = null;
-      if (morphEnabled && morphTime > 0) {
-if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
+  let target = null;
+  if (morphEnabled && morphTime > 0) {
+    if (cur.morphTo && cur.morphTo.length >= MAP_FORMANTS) {
           // Diphthong/glide: morph toward this phoneme's own target.
           target = cur.morphTo;
         } else {
