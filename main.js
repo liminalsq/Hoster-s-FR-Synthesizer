@@ -504,7 +504,7 @@ const stopPreview = () => {
   };
 
   // Kept for back-compat, but now defaults to WHITE (unvoiced).
-  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09) => createWhiteNoiseBuffer(ctx, duration, amp);
+  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09) => createPinkNoiseBuffer(ctx, duration, amp);
 
   // Pick noise type by phonation.
   // voiced fricatives/aspiration => pink
@@ -868,6 +868,48 @@ const stopPreview = () => {
       src.stop(t + d + 0.005);
     };
 
+    const scheduleWhisperFormants = (t, d, f, opt, nextVoiced, isRunStart) => {
+      if (sharedNoiseFilters.length === 0) return;
+      const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORMANTS;
+      const hasVoicedTarget = morphEnabled && morphTime > 0 && nextVoiced && nextVoiced.voiced && nextVoiced.morphs !== false;
+      const morphStart = t + Math.max(0, d - morphTime);
+      const morphEnd = t + d;
+
+      for (let idx = 0; idx < numFormants; idx++) {
+        const curVal = (f && f[idx]) || 0;
+        if (hasMorphTo) {
+          const targetVal = (opt.morphTo && opt.morphTo[idx]) || 0;
+          rampFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal, targetVal, morphEnd);
+        } else if (hasVoicedTarget) {
+          const targetVal = (nextVoiced.f && nextVoiced.f[idx]) || 0;
+          holdThenRampFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal, morphStart, targetVal, morphEnd);
+        } else {
+          holdFreq(sharedNoiseFilters[idx].frequency, t, isRunStart, curVal);
+        }
+      }
+    };
+
+    const playWhisperNoise = (t, d, f, opt = {}) => {
+      if (d <= 0) return;
+      const noiseAmp = opt.noiseAmp ?? 1;
+      const src = ctx.createBufferSource();
+      src.buffer = createWhisperNoiseBuffer(ctx, d, 0.08 * noiseAmp);
+      const gain = ctx.createGain();
+      const amp = (opt.amp ?? 0.9) * noiseAmp;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(amp, t + Math.min(0.01, d));
+      gain.gain.setValueAtTime(amp, t + Math.max(0, d - 0.01));
+      gain.gain.linearRampToValueAtTime(0, t + d);
+      src.connect(gain);
+      if (sharedNoiseFilters.length > 0) {
+        for (const filter of sharedNoiseFilters) gain.connect(filter);
+      } else {
+        gain.connect(master);
+      }
+      src.start(t);
+      src.stop(t + d + 0.005);
+    };
+
 
     // main play routine
     const play = (t, d, f, opt = {}, nextVoiced = null, immediateNext = null) => {
@@ -1094,12 +1136,21 @@ const hasMorphTo = morphEnabled && opt.morphTo && opt.morphTo.length >= MAP_FORM
 
     // schedule phonemes
     let t = 0;
+    let whisperRunStart = true;
     for (let i = 0; i < processedSeq.length; i++) {
       const p = processedSeq[i];
       const immediateNext = processedSeq[i + 1] || null;
       const nextVoiced = findNextVoiced(i);
 
-      if (p.voiced && mode !== "whisper") {
+      if (mode === "whisper") {
+        if (p.key === "rest") {
+          whisperRunStart = true;
+        } else {
+          scheduleWhisperFormants(t, p.d, p.f, p, nextVoiced, whisperRunStart);
+          playWhisperNoise(t, p.d, p);
+          whisperRunStart = false;
+        }
+      } else if (p.voiced) {
         const isRunStart = !currentOsc;
         if (!currentOsc) {
           // start new oscillator for voiced sequence
