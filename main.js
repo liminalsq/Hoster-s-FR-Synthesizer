@@ -27,6 +27,8 @@
   let actx = null;
   let prevSrc = null;
   let previewBuf = null;
+  let lastRenderedAudio = null;
+  let lastRenderedPhonemes = null;
 
 const stopPreview = () => {
     if (prevSrc) {
@@ -2084,6 +2086,15 @@ prevSrc.onended = () => {
       outputControls.appendChild(playBtn);
       outputControls.appendChild(stopBtn);
 
+      const exportBtn = document.createElement("button");
+      exportBtn.textContent = "Export Animation (MP4)";
+      exportBtn.style = "margin-top:8px;margin-left:8px;padding:6px 12px;";
+      exportBtn.onclick = () => exportAnimationMp4(exportBtn);
+      outputControls.appendChild(exportBtn);
+
+      lastRenderedAudio = audioData.slice();
+      lastRenderedPhonemes = phonemeSeq;
+
     } catch (err) {
       console.error(err);
       statusEl.textContent = "Error: " + (err.message || err);
@@ -2383,6 +2394,94 @@ prevSrc.onended = () => {
     }
 
     visualAnimId = requestAnimationFrame(animTick);
+  }
+
+  async function exportAnimationMp4(button) {
+    if (!lastRenderedAudio || !lastRenderedPhonemes) {
+      statusEl.textContent = "Synthesize audio before exporting.";
+      return;
+    }
+    if (!visualCanvas.captureStream || typeof MediaRecorder === "undefined") {
+      statusEl.textContent = "Animation export is not supported in this browser.";
+      return;
+    }
+
+    const mp4Type = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4"
+    ].find(type => MediaRecorder.isTypeSupported(type));
+    if (!mp4Type) {
+      statusEl.textContent = "This browser cannot encode MP4. Try Chrome or Edge for MP4 export.";
+      return;
+    }
+
+    button.disabled = true;
+    statusEl.textContent = "Recording animation...";
+    stopPreview();
+
+    const exportCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuffer = exportCtx.createBuffer(1, lastRenderedAudio.length, sampleRate);
+    audioBuffer.getChannelData(0).set(lastRenderedAudio);
+    const source = exportCtx.createBufferSource();
+    const audioDestination = exportCtx.createMediaStreamDestination();
+    source.buffer = audioBuffer;
+    source.connect(audioDestination);
+
+    const canvasStream = visualCanvas.captureStream(30);
+    const stream = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...audioDestination.stream.getAudioTracks()
+    ]);
+    const recorder = new MediaRecorder(stream, {
+      mimeType: mp4Type,
+      videoBitsPerSecond: 2_500_000,
+      audioBitsPerSecond: 128_000
+    });
+    const chunks = [];
+    const duration = audioBuffer.duration;
+
+    const cleanup = () => {
+      stopVisualAnim();
+      for (const track of stream.getTracks()) track.stop();
+      try { source.stop(); } catch (e) {}
+      try { exportCtx.close(); } catch (e) {}
+      if (actx === exportCtx) actx = null;
+    };
+
+    recorder.ondataavailable = event => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onerror = event => {
+      cleanup();
+      button.disabled = false;
+      statusEl.textContent = "Animation export failed: " + (event.error?.message || "unknown error");
+    };
+    recorder.onstop = () => {
+      cleanup();
+      const blob = new Blob(chunks, { type: mp4Type });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `singer-animation-${Date.now()}.mp4`;
+      link.textContent = "Download MP4 Animation";
+      link.style = "display:inline-block;margin:8px 8px 0 0;";
+      outputControls.appendChild(link);
+      button.disabled = false;
+      statusEl.textContent = "Animation exported.";
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    };
+
+    // Reuse the live visual timing code while the rendered audio plays.
+    visualSeq = lastRenderedPhonemes;
+    actx = exportCtx;
+    visualStartTime = exportCtx.currentTime;
+    startVisualAnim();
+    recorder.start(100);
+    source.connect(exportCtx.destination);
+    source.start();
+    setTimeout(() => {
+      if (recorder.state === "recording") recorder.stop();
+    }, Math.ceil(duration * 1000) + 250);
   }
 
   // ======== PIANO ROLL IMPLEMENTATION ========
