@@ -22,6 +22,8 @@
   let oscType = "rosenberg";        // rosenberg(default) | sawtooth | square | custom
   let customOscSample = null;       // decoded Float32Array for custom waveform
   let customOscSampleRate = 44100;
+  const ROSENBERG_GAIN_BOOST = 1.3;
+  const NOISE_GAIN_BOOST = 1.15;
 
   // preview playback state (shared so re-synthesizing stops any playing preview)
   let actx = null;
@@ -361,7 +363,7 @@ const stopPreview = () => {
   // phon <duration>          (reuses the current pitch)
   // phon phon phon <NOTE,duration> (spaced phonemes share one timing)
   // phon <NOTE,duration,vibFreqHz,vibDelayBeats,vibFadeInBeats,vibSpeedBeats>
-  // [settings] phon <NOTE,duration>  (brackets optional, applied to this phoneme only)
+  // [settings] phon <NOTE,duration>  (settings persist until changed or reset)
   //   fs   = formant scale (e.g. 0.5 male, 1.5 female)
   //   vd   = vibrato depth (Hz)
   //   vf   = vibrato frequency (Hz)
@@ -374,36 +376,47 @@ const stopPreview = () => {
   const parseBracketSettings = (s) => {
     const out = {};
     if (!s) return out;
-    const re = /\b(fs|vd|vf|vde|vfa|vfao)\s*:\s*([\d.]+)\b/gi;
+    const re = /\b(fs|vd|vf|vde|vdae|vfa|vfao)\s*(?::|=)?\s*(-?(?:\d+(?:\.\d*)?|\.\d+))/gi;
     let m;
-    while ((m = re.exec(s)) !== null) out[m[1].toLowerCase()] = parseFloat(m[2]);
+    while ((m = re.exec(s)) !== null) {
+      const key = m[1].toLowerCase() === "vdae" ? "vde" : m[1].toLowerCase();
+      out[key] = parseFloat(m[2]);
+    }
     return out;
   };
   // Apply per-phoneme vibrato overrides from [settings] brackets and <...> extra
   // fields. Only fields that are explicitly provided are stored on the phoneme;
   // anything else falls back to the global vibrato settings at synthesis time.
-  const applyPerNoteVibrato = (p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats) => {
+  const applyPerNoteVibrato = (p, settings, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats) => {
+    if (settings.fs !== 1) {
+      p.f = p.f.map(x => x * settings.fs);
+      if (p.morphTo) p.morphTo = p.morphTo.map(x => x * settings.fs);
+    }
+    if (Number.isFinite(settings.vf)) p.vibFreq = settings.vf;
+    if (Number.isFinite(settings.vd)) p.vibDepth = settings.vd;
+    if (Number.isFinite(settings.vde)) p.vibDelay = settings.vde;
+    if (Number.isFinite(settings.vfa)) p.vibFadeIn = settings.vfa;
+    if (Number.isFinite(settings.vfao)) p.vibFadeOut = settings.vfao;
+    p.vibratoOverride = Number.isFinite(settings.vf) || Number.isFinite(settings.vd) ||
+      Number.isFinite(settings.vde) || Number.isFinite(settings.vfa) || Number.isFinite(settings.vfao) ||
+      vibFreqHz !== null || vibDelayBeats !== null || vibFadeInBeats !== null || vibSpeedBeats !== null;
     if (vibFreqHz !== null && Number.isFinite(vibFreqHz)) p.vibFreq = vibFreqHz;
-    if (vibSpeedBeats !== null && Number.isFinite(vibSpeedBeats)) p.vibFreq = vibSpeedBeats;
+    if (vibSpeedBeats !== null && Number.isFinite(vibSpeedBeats)) p.vibSpeed = vibSpeedBeats;
     if (vibDelayBeats !== null && Number.isFinite(vibDelayBeats)) p.vibDelay = vibDelayBeats * beatLen;
     if (vibFadeInBeats !== null && Number.isFinite(vibFadeInBeats)) p.vibFadeIn = vibFadeInBeats * beatLen;
-    if (bracket.fs) {
-      p.f = p.f.map(x => x * bracket.fs);
-      if (p.morphTo) p.morphTo = p.morphTo.map(x => x * bracket.fs);
-    }
-    if (bracket.vf !== undefined) p.vibFreq = bracket.vf;
-    if (bracket.vd !== undefined) p.vibDepth = bracket.vd;
-    if (bracket.vde !== undefined) p.vibDelay = bracket.vde;
-    if (bracket.vfa !== undefined) p.vibFadeIn = bracket.vfa;
-    if (bracket.vfao !== undefined) p.vibFadeOut = bracket.vfao;
   };
 
     const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+(?:\s+[a-zA-Z']+)*)\s*<\s*([^>]+)\s*>/gi;
     const result = [];
+    const defaultSettings = { fs: 1, vd: null, vf: null, vde: null, vfa: null, vfao: null };
+    let persistentSettings = { ...defaultSettings };
     let currentPitch = noteToFreq("C4");
     let match;
     while ((match = regex.exec(text)) !== null) {
-      const bracket = parseBracketSettings(match[1] || "");
+      const bracketText = match[1] || "";
+      if (/\breset\b/i.test(bracketText)) persistentSettings = { ...defaultSettings };
+      Object.assign(persistentSettings, parseBracketSettings(bracketText));
+      const settings = { ...persistentSettings };
       const tokenRaw = match[2];
       const token = tokenRaw.trim().toLowerCase();
       const hasSeparatedPhonemes = /\s/.test(token);
@@ -438,7 +451,7 @@ const stopPreview = () => {
         p.f = getAdjustedFormants(p.f);
         if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
-        applyPerNoteVibrato(p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
+        applyPerNoteVibrato(p, settings, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
 
         result.push(p);
         continue;
@@ -470,7 +483,7 @@ const stopPreview = () => {
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
-          applyPerNoteVibrato(p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
+          applyPerNoteVibrato(p, settings, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
 
           result.push(p);
         } else {
@@ -485,7 +498,7 @@ const stopPreview = () => {
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
-          applyPerNoteVibrato(p, bracket, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
+          applyPerNoteVibrato(p, settings, beatLen, vibFreqHz, vibDelayBeats, vibFadeInBeats, vibSpeedBeats);
 
           result.push(p);
         }
@@ -504,7 +517,7 @@ const stopPreview = () => {
     const len = Math.max(1, Math.floor(duration * ctx.sampleRate));
     const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = buffer.getChannelData(0);
-    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * amp;
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * amp * NOISE_GAIN_BOOST;
     return buffer;
   };
 
@@ -521,7 +534,7 @@ const stopPreview = () => {
       b1 = 0.96300 * b1 + white * 0.2965164;
       b2 = 0.57000 * b2 + white * 1.0526913;
       const pink = b0 + b1 + b2 + white * 0.1848;
-      data[i] = pink * amp;
+      data[i] = pink * amp * NOISE_GAIN_BOOST;
     }
     return buffer;
   };
@@ -535,6 +548,8 @@ const stopPreview = () => {
   const createFricativeNoiseBuffer = (ctx, duration, { voiced = false, amp = 0.0 } = {}) => {
     return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
   };
+
+  const getVoicedGain = (amp) => amp * 0.89 * (oscType === "rosenberg" ? ROSENBERG_GAIN_BOOST : 1);
 
   // Rosenberg (1971) glottal pulse model.
   // Builds one period of the classic glottal FLOW waveform:
@@ -702,7 +717,7 @@ const stopPreview = () => {
   };
 
   // synthesize with nasal-aware transitions and humanizing features
-  const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1) => {
+  const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1, globalVibFadeIn = 0) => {
     // Preprocess phonemeSeq for humanizing features
     const processedSeq = [];
     for (let i = 0; i < phonemeSeq.length; i++) {
@@ -804,7 +819,8 @@ const stopPreview = () => {
       lfo.type = "sine";
       lfo.frequency.value = vibFreq;
       lfoGain = ctx.createGain();
-      lfoGain.gain.value = vibDepth; // Hz depth
+      lfoGain.gain.setValueAtTime(0, vibDelay);
+      lfoGain.gain.linearRampToValueAtTime(vibDepth, vibDelay + Math.max(0, globalVibFadeIn));
       lfo.connect(lfoGain);
       lfo.start(vibDelay);
       lfo.stop(endTime + 1);
@@ -1121,11 +1137,11 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       // Note: use opt.vib* (per-phoneme fields), falling back to the global vibrato params.
       const vibFreqForNote = Number.isFinite(opt.vibFreq) ? opt.vibFreq : vibFreq;
       const vibDelayForNoteSec = Number.isFinite(opt.vibDelay) ? opt.vibDelay : vibDelay;
-      const vibFadeInForNoteSec = Number.isFinite(opt.vibFadeIn) ? opt.vibFadeIn : 0;
+      const vibFadeInForNoteSec = Number.isFinite(opt.vibFadeIn) ? opt.vibFadeIn : globalVibFadeIn;
       const vibSpeedForNote = Number.isFinite(opt.vibSpeed) ? opt.vibSpeed : null;
 
       const vibForThis = (vibFreqForNote > 0 && vibDepth > 0 && mode !== "whisper");
-      if (vibForThis && lfoGain && persistentVib) {
+      if (vibForThis && lfoGain && persistentVib && !opt.vibratoOverride) {
         // Persistent vibrato only: we can’t retime the global LFO per-note.
         // Use global persistent vibrato.
         lfoGain.connect(pitchParam);
@@ -1174,8 +1190,8 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       const oscGain = ctx.createGain();
       const fadeTime = 0.01;
       oscGain.gain.setValueAtTime(0, t);
-      oscGain.gain.linearRampToValueAtTime(0.89 * amp, t + fadeTime);
-      oscGain.gain.setValueAtTime(0.89 * amp, t + d - fadeTime);
+      oscGain.gain.linearRampToValueAtTime(getVoicedGain(amp), t + fadeTime);
+      oscGain.gain.setValueAtTime(getVoicedGain(amp), t + d - fadeTime);
       oscGain.gain.linearRampToValueAtTime(0, t + d);
       if (voiceFilters.length > 0) {
         for (const filter of voiceFilters) osc.connect(oscGain).connect(filter);
@@ -1259,7 +1275,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
           const fadeTime = 0.01;
           const amp = isNaN(p.amp) ? 1 : p.amp;
           oscGain.gain.setValueAtTime(0, t);
-          oscGain.gain.linearRampToValueAtTime(0.89 * amp, t + fadeTime);
+          oscGain.gain.linearRampToValueAtTime(getVoicedGain(amp), t + fadeTime);
           currentAmp = amp;
           if (voiceFilters.length > 0) {
             for (const filter of voiceFilters) currentOsc.connect(oscGain).connect(filter);
@@ -1279,14 +1295,14 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         const vibFreqForNote = Number.isFinite(p.vibFreq) ? p.vibFreq : vibFreq;
         const vibDepthForNote = Number.isFinite(p.vibDepth) ? p.vibDepth : vibDepth;
         const vibDelayForNoteSec = Number.isFinite(p.vibDelay) ? p.vibDelay : vibDelay;
-        const vibFadeInForNoteSec = Number.isFinite(p.vibFadeIn) ? p.vibFadeIn : 0;
+        const vibFadeInForNoteSec = Number.isFinite(p.vibFadeIn) ? p.vibFadeIn : globalVibFadeIn;
         const vibFadeOutForNoteSec = Number.isFinite(p.vibFadeOut) ? p.vibFadeOut : 0;
         const vibSpeedForNote = Number.isFinite(p.vibSpeed) ? p.vibSpeed : null;
 
         // Determine if vibrato should be active for this note (requires freq>0, depth>0, not whisper)
         const vibeOnForThis = (vibFreqForNote > 0 && vibDepthForNote > 0 && mode !== "whisper");
 
-        if (vibeOnForThis && lfoGain && persistentVib) {
+        if (vibeOnForThis && lfoGain && persistentVib && !p.vibratoOverride) {
           // Global persistent LFO — connect only once per oscillator run
           if (!vibConnected) {
             lfoGain.connect(pitchParam);
@@ -1305,7 +1321,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         //   - NOT using the persistent global LFO (i.e. persistentVib is false, OR there's no lfoGain)
         // This ensures bracket overrides (vf, vd, vde, vfa, vfao) actually take effect per phoneme
         // and supports disabling vibrato per note (e.g. [vf: 0]).
-        if (vibeOnForThis && !(lfoGain && persistentVib)) {
+        if (vibeOnForThis && !(lfoGain && persistentVib && !p.vibratoOverride)) {
           const lfol = ctx.createOscillator();
           const lfoGl = ctx.createGain();
           lfol.type = "sine";
@@ -1416,7 +1432,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         if (currentOsc) {
           // stop the oscillator with fade-out
           const fadeTime = 0.01;
-          oscGain.gain.setValueAtTime(0.89 * currentAmp, lastVoicedEnd - fadeTime);
+          oscGain.gain.setValueAtTime(getVoicedGain(currentAmp), lastVoicedEnd - fadeTime);
           oscGain.gain.linearRampToValueAtTime(0, lastVoicedEnd);
           currentOsc.stop(lastVoicedEnd);
           currentOsc = null;
@@ -1488,26 +1504,82 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
   document.querySelectorAll(".voice-ui").forEach(e => e.remove());
   const container = document.createElement("div");
   container.className = "voice-ui";
-  container.style = "margin:0 auto;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;max-width:900px;box-sizing:border-box;";
+   container.style = "margin:0 auto;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;max-width:900px;box-sizing:border-box;";
   container.innerHTML = `
+    <>
     <h3 style="margin:0 0 8px 0">Hoster's FR Synthesizer</h3>
-<div style="font-size:12px;margin-bottom:8px">Javascript Synth that sings for u or smth and is (probably) very buggy and makes artifacts</div>
-<div style="font-size:12px;margin-bottom:8px">This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)</div>
-<div style="font-size:12px;margin-bottom:16px">this is ai-written but give me some credit, at least i did SOME of the work...</div>
-    <!-- Visual Frame -->
+    <div style="font-size:12px;margin-bottom:8px">Javascript Synth that sings for u or smth and is (probably) very buggy and makes artifacts</div>
+    <div style="font-size:12px;margin-bottom:8px">This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)</div>
+    <div style="font-size:12px;margin-bottom:16px">this is ai-written but give me some credit, at least i did SOME of the work...</div>
+    <!-- Embedded duplicate help markup is disabled; the standalone panel follows below. -->
+    <!--
+      <div id="syntaxHelpHeader" style="display:flex;align-items:center;gap:6px;padding:7px 8px;background:#f2f2f2;border-bottom:1px solid #ccc;cursor:grab;user-select:none;touch-action:none;">
+    <b style="flex:1;">Syntax Help</b>
+    <button id="syntaxRotate" type="button" title="Drag header to rotate" style="padding:1px 5px;">R</button>
+    <button id="syntaxCollapse" type="button" title="Collapse help" style="padding:1px 5px;">-</button>
+    <button id="syntaxClose" type="button" title="Close help" style="padding:1px 5px;">x</button>
+      </div>
+      <div id="syntaxHelpBody" style="height:calc(100% - 35px);overflow:auto;padding:9px 10px;box-sizing:border-box;">
+    <div><b>Notes</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 9px;">a &lt;C4,1&gt;   explicit pitch and duration
+        <label style="display:flex; align-items:center; gap:6px;">
+  rest &lt;0.25&gt;  silence</pre>
+    <div><b>Persistent settings</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 4px;">[fs:1.2, vf:6, vd:5, vde:0.1, vfa:0.2, vfao:0.1] a &lt;C4,1&gt;
+          <input type="checkbox" id="disableFilters"/>
+  [reset] i &lt;1&gt;  restore defaults</pre>
+    <div style="margin-bottom:9px;">Use <code>name:value</code>, <code>name=value</code>, or <code>name value</code>. Separate settings with commas or spaces. <code>vdae</code> aliases <code>vde</code>.</div>
+    <div><b>Setting names</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 9px;">fs    formant scale
+  vf    vibrato frequency (Hz)
+  vd    vibrato depth (Hz)
+  vde   vibrato delay (seconds)
+  vfa   vibrato fade-in (seconds)
+  vfao  vibrato fade-out (seconds)</pre>
+    <div><b>Inline fields</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 9px;">a &lt;C4,1,6,0.1,0.2,4&gt;
+  pitch, duration, frequency, delay,
+  fade-in, speed</pre>
+    <div style="margin-bottom:9px;">Inline fields override persistent settings for that note.</div>
+    <div><b>Examples</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0;">[fs:0.8] a &lt;C3,1&gt;
+  [vf:0] e &lt;1&gt;
+  [vd:8, vfa:0.4] i &lt;1&gt;
+  [reset] o &lt;1&gt;</pre>
+      </div>
+    -->
     <div id="visualFrame" style="position:fixed; top:10px; right:10px; width:240px; height:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
       <div style="font-weight:bold; text-align:center; font-size:13px; border-bottom:1px solid #ccc; padding-bottom:2px;">Visual</div>
       <canvas id="visualCanvas" width="210" height="140" style="display:block; margin:4px auto;"></canvas>
       <div id="visualFormants" style="text-align:center; font-size:11px; margin-top:4px;">F1: 0&nbsp;&nbsp;F2: 0&nbsp;&nbsp;F3: 0</div>
       <div id="visualPhone" style="text-align:center; font-size:11px; margin-top:3px;">Current Phone: None</div>
     </div>
-    <!-- Experimental / Useless / For Fun -->
     <div id="experimentalPanel" style="position:fixed; top:258px; right:10px; width:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
       <div style="font-weight:bold; text-align:center; font-size:12px; border-bottom:1px solid #ccc; padding-bottom:2px;">Experimental/Useless/For Fun</div>
       <div style="margin-top:4px; font-size:11px;">
         <label style="display:flex; align-items:center; gap:6px;">
           <input type="checkbox" id="disableFilters"/>
           Disable biquad/formant filter
+        </label>
+      </div>
+      <div style="margin-top:6px; font-size:11px;">
+        <label>Oscillator / Glottal pulse:
+          <select id="oscTypeSel" style="width:100%; margin-top:2px;">
+            <option value="rosenberg">Rosenberg/Default</option>
+            <option value="lf">Liljencrants-Fant (LF)</option>
+            <option value="sawtooth">Sawtooth</option>
+            <option value="square">Square</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+      </div>
+      <div id="customOscControls" style="display:none; margin-top:6px; font-size:11px;">
+        <button id="uploadOscBtn" style="width:100%; padding:4px 6px;">Upload oscillator sample</button>
+        <input type="file" id="oscFile" accept="audio/*" style="display:none;"/>
+        <div id="oscStatus" style="margin-top:3px; font-size:10px; color:#555;"></div>
+      </div>
+    </div>
+          
         </label>
       </div>
       <div style="margin-top:6px; font-size:11px;">
@@ -1544,6 +1616,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       <label>Vibrato Freq (Hz): <input type="number" id="vibFreq" value="6" step="0.1" style="width:80px"/></label>
       <label style="margin-left:8px">Depth (Hz): <input type="number" id="vibDepth" value="5" step="0.1" style="width:80px"/></label>
       <label style="margin-left:8px">Delay (s): <input type="number" id="vibDelay" value="0.1" step="0.01" style="width:80px"/></label>
+      <label style="margin-left:8px">Fade (s): <input type="number" id="vibFade" value="0" min="0" step="0.01" style="width:70px"/></label>
       <label style="margin-left:8px"><input type="checkbox" id="persistentVib" checked/> Persistent Vibrato</label>
     </div>
     <div style="margin-top:6px">
@@ -1623,6 +1696,105 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
     </div>
   `;
   document.body.appendChild(container);
+
+  const syntaxHelp = document.createElement("div");
+  syntaxHelp.className = "syntax-help";
+  syntaxHelp.style = "position:fixed;left:10px;bottom:10px;width:320px;height:390px;min-width:240px;min-height:150px;max-width:80vw;max-height:80vh;overflow:hidden;padding:0;background:#fff;border:1px solid #999;border-radius:6px;box-sizing:border-box;font-family:monospace;font-size:11px;z-index:20;resize:both;transform-origin:center center;box-shadow:2px 2px 8px rgba(0,0,0,0.18);";
+  syntaxHelp.innerHTML = `
+    <div id="syntaxHelpHeader" style="display:flex;align-items:center;gap:6px;padding:7px 8px;background:#f2f2f2;border-bottom:1px solid #ccc;cursor:grab;user-select:none;touch-action:none;">
+      <b style="flex:1;">Syntax Help</b>
+      <button id="syntaxRotate" type="button" title="Drag header to rotate" style="padding:1px 5px;">R</button>
+      <button id="syntaxCollapse" type="button" title="Collapse help" style="padding:1px 5px;">-</button>
+      <button id="syntaxClose" type="button" title="Close help" style="padding:1px 5px;">x</button>
+    </div>
+    <div id="syntaxHelpBody" style="height:calc(100% - 35px);overflow:auto;padding:9px 10px;box-sizing:border-box;">
+    <div><b>Basic note</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 8px;">a &lt;C4,1&gt; e &lt;1&gt;
+rest &lt;0.25&gt;</pre>
+    <div><b>Persistent settings</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 8px;">[fs:1.2, vf:6, vd:5, vde:0.1, vfa:0.2, vfao:0.1] a &lt;C4,1&gt;
+e &lt;1&gt;   settings continue here
+[reset] i &lt;1&gt;   restore defaults</pre>
+    <div>Settings also accept <code>fs=1.2</code> or <code>fs 1.2</code>. <code>vdae</code> is accepted as an alias for <code>vde</code>.</div>
+    <div style="margin-top:6px;"><b>Per-note fields</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 0;">a &lt;C4,1,6,0.1,0.2,4&gt;
+pitch, duration, vibFreq, vibDelay,
+vibFadeIn, vibSpeed</pre>
+    </div>
+  `;
+  document.body.appendChild(syntaxHelp);
+
+  const syntaxReopen = document.createElement("button");
+  syntaxReopen.type = "button";
+  syntaxReopen.textContent = "Syntax Help";
+  syntaxReopen.title = "Open syntax help";
+  syntaxReopen.style = "display:none;position:fixed;left:10px;bottom:10px;padding:5px 8px;z-index:20;";
+  document.body.appendChild(syntaxReopen);
+
+  const syntaxHeader = syntaxHelp.querySelector("#syntaxHelpHeader");
+  const syntaxBody = syntaxHelp.querySelector("#syntaxHelpBody");
+  const syntaxRotate = syntaxHelp.querySelector("#syntaxRotate");
+  const syntaxCollapse = syntaxHelp.querySelector("#syntaxCollapse");
+  const syntaxClose = syntaxHelp.querySelector("#syntaxClose");
+  let syntaxRotation = 0;
+  let syntaxRotateMode = false;
+  let syntaxDrag = null;
+  let syntaxDragFrame = null;
+
+  const scheduleSyntaxPanelUpdate = (x, y) => {
+    if (syntaxDragFrame) return;
+    syntaxDragFrame = requestAnimationFrame(() => {
+      syntaxDragFrame = null;
+      if (x !== null && y !== null) {
+        syntaxHelp.style.left = `${x}px`;
+        syntaxHelp.style.top = `${y}px`;
+        syntaxHelp.style.bottom = "auto";
+      }
+      syntaxHelp.style.transform = `rotate(${syntaxRotation}deg)`;
+    });
+  };
+
+  syntaxRotate.addEventListener("click", () => {
+    syntaxRotateMode = !syntaxRotateMode;
+    syntaxRotate.style.background = syntaxRotateMode ? "#ddd" : "";
+    syntaxHeader.style.cursor = syntaxRotateMode ? "crosshair" : "grab";
+  });
+  syntaxCollapse.addEventListener("click", () => {
+    const collapsed = syntaxBody.style.display === "none";
+    syntaxBody.style.display = collapsed ? "block" : "none";
+    syntaxHelp.style.height = collapsed ? "390px" : "35px";
+    syntaxCollapse.textContent = collapsed ? "-" : "+";
+  });
+  syntaxClose.addEventListener("click", () => {
+    syntaxHelp.style.display = "none";
+    syntaxReopen.style.display = "block";
+  });
+  syntaxReopen.addEventListener("click", () => {
+    syntaxHelp.style.display = "block";
+    syntaxReopen.style.display = "none";
+  });
+  syntaxHeader.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button")) return;
+    syntaxHeader.setPointerCapture(event.pointerId);
+    const rect = syntaxHelp.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    syntaxDrag = syntaxRotateMode
+      ? { rotate: true, centerX, centerY, startAngle: Math.atan2(event.clientY - centerY, event.clientX - centerX), startRotation: syntaxRotation }
+      : { rotate: false, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+    event.preventDefault();
+  });
+  syntaxHeader.addEventListener("pointermove", (event) => {
+    if (!syntaxDrag) return;
+    if (syntaxDrag.rotate) {
+      syntaxRotation = syntaxDrag.startRotation + (Math.atan2(event.clientY - syntaxDrag.centerY, event.clientX - syntaxDrag.centerX) - syntaxDrag.startAngle) * 180 / Math.PI;
+      scheduleSyntaxPanelUpdate(null, null);
+    } else {
+      scheduleSyntaxPanelUpdate(event.clientX - syntaxDrag.offsetX, event.clientY - syntaxDrag.offsetY);
+    }
+  });
+  syntaxHeader.addEventListener("pointerup", () => { syntaxDrag = null; });
+  syntaxHeader.addEventListener("pointercancel", () => { syntaxDrag = null; });
 
   const gridTypeEl = container.querySelector("#gridType");
   const stepsLabel = container.querySelector("#stepsPerBeatLabel");
@@ -2008,6 +2180,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       const vibratoFreq = parseFloat(container.querySelector("#vibFreq").value) || 0;
       const vibratoDepth = parseFloat(container.querySelector("#vibDepth").value) || 0;
       const vibratoDelay = parseFloat(container.querySelector("#vibDelay").value) || 0;
+      const vibratoFadeIn = Math.max(0, parseFloat(container.querySelector("#vibFade").value) || 0);
       const persistentVib = !!container.querySelector("#persistentVib").checked;
       const morphTime = Math.max(0, parseFloat(container.querySelector("#morphTime").value) || 0.06);
       const enableMorph = !!container.querySelector("#enableMorph").checked;
@@ -2020,7 +2193,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       statusEl.textContent = `Rendering ${totalDuration.toFixed(2)}s...`;
       const offlineCtx = new OfflineAudioContext(1, Math.ceil(totalDuration * sampleRate) + 128, sampleRate);
 
-      const renderedBuffer = await synthesize(offlineCtx, phonemeSeq, mode, vibratoFreq, vibratoDepth, vibratoDelay, morphTime, enableMorph, slideTime, persistentVib, dynamicMode, consonantDuration);
+      const renderedBuffer = await synthesize(offlineCtx, phonemeSeq, mode, vibratoFreq, vibratoDepth, vibratoDelay, morphTime, enableMorph, slideTime, persistentVib, dynamicMode, consonantDuration, vibratoFadeIn);
       statusEl.textContent = "Done";
 
       // WAV creation & preview
@@ -2926,47 +3099,33 @@ prevSrc.onended = () => {
     </div><div id="prPhoneBankButtons" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;"></div>`;
 
     const buttons = frame.querySelector("#prPhoneBankButtons");
+
+    container.innerHTML = `
+      <h3 style="margin:0 0 8px">Hoster's FR Synthesizer</h3>
+      <div style="font-size:12px;margin-bottom:8px">
+        Javascript Synth that sings for u or smth and is (probably) very buggy and makes artifacts
+      </div>
+      <div style="font-size:12px;margin-bottom:8px">
+        This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)
+      </div>
+      <div style="font-size:12px;margin-bottom:16px">
+        this is ai-written but give me some credit, at least i did SOME of the work...
+      </div>
+
+      <div id="visualFrame" style="position:fixed;top:10px;right:10px;width:240px;height:240px;border:2px solid #333;background:#fff;border-radius:6px;box-sizing:border-box;padding:6px;font-family:monospace;z-index:10;">
+        <div style="font-weight:bold;text-align:center;font-size:13px;border-bottom:1px solid #ccc;padding-bottom:2px;">Visual</div>
+        <canvas id="visualCanvas" width="210" height="140" style="display:block;margin:4px auto;"></canvas>
+        <div id="visualFormants" style="text-align:center;font-size:11px;margin-top:4px;">F1: 0&nbsp;&nbsp;F2: 0&nbsp;&nbsp;F3: 0</div>
+        <div id="visualPhone" style="text-align:center;font-size:11px;margin-top:3px;">Current Phone: None</div>
+      </div>
+    `;
+    
     for (const key of Object.keys(phonemeMap)) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = key;
+      container.style = "margin:0 auto;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;max-width:900px;box-sizing:border-box;";
       button.title = `Preview ${key}`;
-      button.style.cssText = "padding:3px 2px;font-family:monospace;font-size:11px;";
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-          await previewPhoneme(key);
-        } catch (error) {
-          console.error(`Failed to preview phoneme ${key}:`, error);
-        } finally {
-          button.disabled = false;
-        }
-      });
-      buttons.appendChild(button);
-    }
 
-    openButton.addEventListener("click", () => {
-      frame.style.display = frame.style.display === "none" ? "block" : "none";
-    });
-    frame.querySelector("#prClosePhoneBank").addEventListener("click", () => {
-      frame.style.display = "none";
-    });
-
-    pianoRollPanelEl.append(openButton, frame);
-  }
-
-  // Render/update the left panel based on the current selection.
-  // - No selection            -> piano-roll settings (consonant wrapper toggle, snap, refresh).
-  // - Single selected note    -> note editor (phoneme, start/end split when a consonant+vowel is
-  //                              wrapped into a visual "[cv]" group).
-  // - Multi-selection         -> summary + deselect.
-  function updatePianoRollPanel() {
-    if (!pianoRollPanelEl) return;
-    const gridType = container.querySelector("#gridType").value || "beats";
-    const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
-
-    if (selectedNoteIndexes.size === 0) {
-      // Piano roll settings.
       let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Piano Roll Settings</div>`;
       h += `<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;">
               <input type="checkbox" id="prConsonantWrap" ${consonantWrapperEnabled ? "checked" : ""}/>
@@ -3192,6 +3351,52 @@ prevSrc.onended = () => {
       updatePianoRollPanel();
     });
   }
+
+  const gridType = container.querySelector("#gridType").value || "beats";
+  const stepsPerBeat = Math.max(
+    1,
+    parseInt(container.querySelector("#stepsPerBeat").value, 10) || 4
+  );
+
+  function updatePianoRollPanel() {
+  if (!pianoRollPanelEl) return;
+
+  const gridType = container.querySelector("#gridType").value || "beats";
+  const stepsPerBeat = Math.max(
+    1,
+    parseInt(container.querySelector("#stepsPerBeat").value, 10) || 4
+  );
+
+  let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Piano Roll Settings</div>`;
+  h += `<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;">
+    <input type="checkbox" id="prConsonantWrap" ${consonantWrapperEnabled ? "checked" : ""}/>
+    Consonant wrapping
+  </label>`;
+  h += `<label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;">
+    <input type="checkbox" id="prSnap" ${pianoRollSnap.checked ? "checked" : ""}/>
+    Snap to grid
+  </label>`;
+  h += `<button id="prRefreshBtn" class="pe-btn">Refresh from text</button>`;
+  h += `<div class="pe-hint">Grid: ${gridType}, ${stepsPerBeat} steps per beat</div>`;
+
+  pianoRollPanelEl.innerHTML = h;
+
+  pianoRollPanelEl.querySelector("#prConsonantWrap").addEventListener("change", (event) => {
+    consonantWrapperEnabled = event.target.checked;
+    drawPianoRoll();
+  });
+
+  pianoRollPanelEl.querySelector("#prSnap").addEventListener("change", (event) => {
+    pianoRollSnap.checked = event.target.checked;
+    drawPianoRoll();
+  });
+
+  pianoRollPanelEl.querySelector("#prRefreshBtn").addEventListener("click", () => {
+    selectedNoteIndex = -1;
+    selectedNoteIndexes.clear();
+    drawPianoRoll();
+  });
+}
 
   // Update text input from piano roll notes
   function updateTextFromPianoRoll() {
