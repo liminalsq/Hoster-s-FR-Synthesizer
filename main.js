@@ -596,6 +596,55 @@ const stopPreview = () => {
     return ctx.createPeriodicWave(real, imag);
   };
 
+  // Liljencrants-Fant-style glottal flow derivative. The LF source models the
+  // asymmetric open phase with an exponential sinusoid and the closing phase
+  // with a short exponential return, then uses its derivative as excitation.
+  const createLFGlottalWave = (ctx, numHarmonics = 27, openQuotient = 0.55, returnQuotient = 0.2) => {
+    const nH = Math.max(2, numHarmonics | 0);
+    const sampleCount = 1024;
+    const flow = new Float32Array(sampleCount + 1);
+    const OQ = Math.min(0.9, Math.max(0.35, openQuotient));
+    const RQ = Math.min(0.4, Math.max(0.02, returnQuotient));
+    const openSamples = Math.max(2, Math.floor(sampleCount * OQ));
+    const returnSamples = Math.max(1, Math.floor(sampleCount * RQ));
+    const peakSample = Math.max(1, Math.floor(openSamples * 0.6));
+
+    for (let i = 0; i <= sampleCount; i++) {
+      if (i <= openSamples) {
+        const x = i / openSamples;
+        const peakX = peakSample / openSamples;
+        const phase = Math.min(1, x / peakX);
+        const growth = 3.5 * phase;
+        flow[i] = Math.exp(growth - 3.5 * phase * phase) * Math.sin(Math.PI * phase * 0.5);
+      } else {
+        const closingProgress = Math.min(1, (i - openSamples) / returnSamples);
+        flow[i] = Math.exp(-7 * closingProgress);
+      }
+    }
+
+    const real = new Float32Array(nH);
+    const imag = new Float32Array(nH);
+    for (let k = 1; k < nH; k++) {
+      let re = 0;
+      let im = 0;
+      for (let i = 0; i < sampleCount; i++) {
+        const derivative = flow[i + 1] - flow[i];
+        const phase = 2 * Math.PI * k * i / sampleCount;
+        re += derivative * Math.cos(phase);
+        im -= derivative * Math.sin(phase);
+      }
+      real[k] = re;
+      imag[k] = im;
+    }
+
+    const fundamental = Math.hypot(real[1], imag[1]) || 1;
+    for (let k = 1; k < nH; k++) {
+      real[k] /= fundamental;
+      imag[k] /= fundamental;
+    }
+    return ctx.createPeriodicWave(real, imag);
+  };
+
   // Build a PeriodicWave from a single detected period of an uploaded sample.
   const createPeriodicWaveFromSample = (ctx, data, sr) => {
     const N = Math.min(4096, data.length);
@@ -641,6 +690,9 @@ const stopPreview = () => {
     const t = oscType || "rosenberg";
     if (t === "sawtooth") osc.type = "sawtooth";
     else if (t === "square") osc.type = "square";
+    else if (t === "lf") {
+      osc.setPeriodicWave(createLFGlottalWave(ctx, 27, clonedTimbre.duty));
+    }
     else if (t === "custom" && customOscSample) {
       osc.setPeriodicWave(createPeriodicWaveFromSample(ctx, customOscSample, customOscSampleRate));
     } else {
@@ -774,6 +826,7 @@ const stopPreview = () => {
     // phoneme's onset before following its own formant schedule. Fresh runs
     // (after a rest / at the start of a sequence) still hard-set at time t.
     const GLIDE = 0.006; // seconds
+    const scheduledFormantEnds = new WeakMap();
     const getFreqAt = (param, t) => {
       try {
         const v = param.getValueAtTime(t);
@@ -792,11 +845,12 @@ const stopPreview = () => {
           param.cancelScheduledValues(t);
           param.setValueAtTime(onset, t);
         } else {
-          const cur = getFreqAt(param, t);
+          const cur = scheduledFormantEnds.get(param) ?? getFreqAt(param, t);
           param.setValueAtTime(cur != null ? cur : onset, t);
           param.linearRampToValueAtTime(onset, tOnset);
         }
         param.setValueAtTime(onset, tOnset);
+        scheduledFormantEnds.set(param, onset);
       } catch (e) {}
     };
     // Ramp onset -> target across [tOnset, endTime] (used by hasMorphTo).
@@ -804,6 +858,7 @@ const stopPreview = () => {
       try {
         anchorStart(param, t, isRunStart, onset);
         param.linearRampToValueAtTime(target, endTime);
+        scheduledFormantEnds.set(param, target);
       } catch (e) {}
     };
     // Hold onset across the phoneme (used by nasal / no-target branches).
@@ -819,6 +874,7 @@ const stopPreview = () => {
           param.setValueAtTime(onset, rampStart);
         }
         param.linearRampToValueAtTime(target, endTime);
+        scheduledFormantEnds.set(param, target);
       } catch (e) {}
     };
 
@@ -1197,25 +1253,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         const isRunStart = !currentOsc;
         if (!currentOsc) {
           // start new oscillator for voiced sequence
-          currentOsc = ctx.createOscillator();
-
-          const numHarmonics = 27;
-          const real = new Float32Array(numHarmonics);
-          const imag = new Float32Array(numHarmonics);
-          for (let n = 1; n < numHarmonics; n++) {
-            real[n] = 1 / (n * n);
-          }
-
-          if (oscType === "rosenberg"){
-            const glottalWave = ctx.createPeriodicWave(real, imag);
-            currentOsc.setPeriodicWave(glottalWave);
-          } else {
-            if (oscType !== "custom"){
-              currentOsc.type = oscType
-            } else {
-              currentOsc = createSelectedOsc(ctx)
-            };
-          };
+          currentOsc = createSelectedOsc(ctx);
 
           oscGain = ctx.createGain();
           const fadeTime = 0.01;
@@ -1476,6 +1514,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         <label>Oscillator / Glottal pulse:
           <select id="oscTypeSel" style="width:100%; margin-top:2px;">
             <option value="rosenberg">Rosenberg/Default</option>
+            <option value="lf">Liljencrants-Fant (LF)</option>
             <option value="sawtooth">Sawtooth</option>
             <option value="square">Square</option>
             <option value="custom">Custom</option>
