@@ -181,7 +181,7 @@ const stopPreview = () => {
     th: { f: [1150, 2150, 3450, 4500, 5500, 6500], breathy: true, voiced: false, noiseAmp: 1 },
     dh: { f: [270,  1290, 2540, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 0.25, amp: 0.55 },
     sh: { f: [2450, 3050, 3950, 4900, 5900, 6900], breathy: true, voiced: false, noiseAmp: 1 },
-    ch: { f: [1950, 2950, 4450, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
+    ch: { f: [350, 1800, 2820, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
     uh: { f: [450,  1100,  2350, 3500, 4500, 5500], voiced: true },
 
     // --- ADDED PHONES & DIPHTHONGS ---
