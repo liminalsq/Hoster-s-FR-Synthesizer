@@ -189,8 +189,8 @@ const stopPreview = () => {
     jh:  { f: [260, 1800, 2820, 3600, 4600, 5600], voiced: true, breathy: true, amp: 0.8, noiseAmp: 0.15 },
     ng: { f: [200, 850,  1950, 3300, 4300, 5300], voiced: true, nasal: true },
 
-    oy: { f: [600, 850,  2550, 3400, 4400, 5400], morphTo: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
-    ow: { f: [600, 1000, 2600, 3400, 4400, 5400], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
+    oy: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [350, 2200, 2900, 3600, 4500, 5500], voiced: true },
+    ow: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
     ou: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
     ol: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
     or: { f: [400, 1000, 2600, 3400, 4400, 5400], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
@@ -748,12 +748,12 @@ const stopPreview = () => {
         // silence is implicit by delaying start
       }
 
-      // In dynamic mode, /s/ anticipates an adjacent stop by fading to silence
+      // In dynamic mode, /s/ anticipates an adjacent stop by fading to silence (formerly)
       // before the stop begins. Standalone consonants keep their token duration.
-      if (dynamicMode && p.key === "s" || p.key === "z") {
-        const nextKey = phonemeSeq[i + 1]?.key;
-        p.dynamicFadeOut = nextKey === "t" || nextKey === "p" || nextKey === "d" || nextKey === "b";
-      }
+      const nextKey = phonemeSeq[i + 1]?.key;
+      //if (p.key === "s" || p.key === "z") {
+        p.dynamicFadeOut = nextKey === "t" || nextKey === "p" || nextKey === "d" || nextKey === "b" || nextKey === "k" || nextKey === "p" || nextKey === "k" || nextKey === "b" || nextKey === "g" ;
+      //}
 
       processedSeq.push(p);
     }
