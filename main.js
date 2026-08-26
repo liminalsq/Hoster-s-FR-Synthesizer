@@ -2334,6 +2334,7 @@ prevSrc.onended = () => {
 
   // Smooth mouth height transition state
   let currentMouthH = 4; // Start near closed state
+  let currentMouthW = 3.5; // Start near default width
 
   // Eye blinking state
   let blinkState = {
@@ -2425,8 +2426,9 @@ prevSrc.onended = () => {
     // --- Smooth Height Interpolation (Lerp) ---
     // Adjust 0.2 to make closing faster (e.g. 0.3) or smoother/slower (e.g. 0.1)
     currentMouthH += (targetMouthH - currentMouthH) * 0.15;
+    currentMouthW += (targetMouthW - currentMouthW) * 0.15;
 
-    const mouthW = targetMouthW;
+    const mouthW = currentMouthW;
     const mouthH = currentMouthH;
 
     const mouthRx = mouthW / 2;
