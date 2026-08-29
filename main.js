@@ -4,7 +4,7 @@
   // voice cloning and gender variables
   let genderShift = 0; // -100 (male) to 100 (female)
   let clonedRatios = null; // ratios for formant scaling from cloned voice
-  let clonedTimbre = { harmonics: 27, duty: 0.55 }; // default
+  let clonedTimbre = { harmonics: 27, duty: 0.65 }; // default
   const standardFormants = [700, 1220, 2600]; // standard formants for 'a'
 
   // personal dictionary and dynamic mode
@@ -22,7 +22,7 @@
   let oscType = "rosenberg";        // rosenberg(default) | sawtooth | square | custom
   let customOscSample = null;       // decoded Float32Array for custom waveform
   let customOscSampleRate = 44100;
-  const ROSENBERG_GAIN_BOOST = 1.3;
+  const ROSENBERG_GAIN_BOOST = 1.7;
   const NOISE_GAIN_BOOST = 1.15;
 
   // preview playback state (shared so re-synthesizing stops any playing preview)
@@ -199,7 +199,8 @@ const stopPreview = () => {
     aw: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [400, 1000, 2600, 3400, 4400, 5400], voiced: true },
     ar: { f: [700, 1220, 2600, 3500, 4500, 5500], morphTo: [450, 1300, 1700, 3200, 4300, 5300], voiced: true },
     al: { f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
-    aee:{ f: [650, 1250, 2550, 3500, 4500, 5500], morphTo: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
+    ao: { f: [650, 990, 2570, 3500, 4500, 5500], morphTo: [630, 1040, 2600, 3500, 4500, 5500], voiced: true },
+    aee:{ f: [600, 1250, 2550, 3500, 4500, 5500], morphTo: [285, 2275, 2900, 3650, 4650, 5650], voiced: true },
 
     ew: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
     eu: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
@@ -1028,7 +1029,7 @@ const stopPreview = () => {
 
       // If current phoneme is consonant/unvoiced or purely breathy/burst -> produce consonant-filtered noise
       if (opt.breathy || opt.burst) {
-        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, opt.key === "s" ? 0.5 : 0);
+        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, (opt.key === "s" || opt.key === "ch" || opt.key === "sh" || opt.key === "z" ) ? 0.5 : 0);
         // If it's not voiced at all, we're done
         if (!voiced) return;
       }
