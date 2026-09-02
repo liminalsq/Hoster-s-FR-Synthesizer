@@ -1817,10 +1817,16 @@ vibFadeIn, vibSpeed</pre>
 
   const animateSyntaxPanel = () => {
     if (!syntaxDrag) {
-      syntaxRotationVelocity *= 0.9;
-      if (Math.abs(syntaxRotationVelocity) < 0.08) syntaxRotationVelocity = 0;
-      syntaxRotation += syntaxRotationVelocity;
-      if (Math.abs(syntaxRotation) < 0.05) syntaxRotation = 0;
+      const homePull = -syntaxRotation * 0.12;
+      syntaxRotationVelocity += homePull;
+      syntaxRotationVelocity *= 0.86;
+      if (Math.abs(syntaxRotationVelocity) < 0.08 && Math.abs(syntaxRotation) < 0.08) {
+        syntaxRotation = 0;
+        syntaxRotationVelocity = 0;
+      } else {
+        syntaxRotation += syntaxRotationVelocity;
+        if (Math.abs(syntaxRotation) < 0.05) syntaxRotation = 0;
+      }
       scheduleSyntaxPanelUpdate(null, null);
     }
     requestAnimationFrame(animateSyntaxPanel);
@@ -1864,11 +1870,13 @@ vibFadeIn, vibSpeed</pre>
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
     const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
-    const deltaAngle = (angle - syntaxDrag.lastAngle) * 180 / Math.PI;
+    const rawDeltaAngle = (angle - syntaxDrag.lastAngle);
+    const deltaAngle = ((rawDeltaAngle + Math.PI) % (Math.PI * 2)) - Math.PI;
     const now = performance.now();
     const dt = Math.max(16, now - syntaxDrag.lastTime);
-    syntaxRotation += deltaAngle;
-    syntaxRotationVelocity = (deltaAngle / dt) * 1000 * 0.7;
+    syntaxRotation += deltaAngle * 180 / Math.PI;
+    syntaxRotationVelocity = (deltaAngle * 180 / Math.PI / dt) * 1000 * 0.7;
+    syntaxRotationVelocity = Math.max(-180, Math.min(180, syntaxRotationVelocity));
     syntaxDrag.lastAngle = angle;
     syntaxDrag.lastTime = now;
     const left = event.clientX - syntaxDrag.offsetX;
