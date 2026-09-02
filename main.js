@@ -49,6 +49,25 @@ const stopPreview = () => {
     }
   };
 
+  const resolvePortamento = (value, fallbackSeconds = 0.08, noteDuration = 0) => {
+    const normalizePortamento = (candidate, fallbackNoteDuration) => {
+      if (candidate == null || candidate === "") {
+        return Number.isFinite(fallbackSeconds) ? Math.max(0, Number(fallbackSeconds)) : 0;
+      }
+      if (typeof candidate === "string") {
+        const trimmed = candidate.trim();
+        if (/^auto$/i.test(trimmed)) return Math.max(0, fallbackNoteDuration * 0.5);
+        const parsed = parseFloat(trimmed);
+        if (Number.isFinite(parsed)) return Math.max(0, parsed);
+        return Number.isFinite(fallbackSeconds) ? Math.max(0, Number(fallbackSeconds)) : 0;
+      }
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed)) return Math.max(0, parsed);
+      return Number.isFinite(fallbackSeconds) ? Math.max(0, Number(fallbackSeconds)) : 0;
+    };
+    return normalizePortamento(value, noteDuration);
+  };
+
   // personal dictionary persistence functions
   function savePersonalDict() {
     try {
@@ -381,11 +400,13 @@ const stopPreview = () => {
   const parseBracketSettings = (s) => {
     const out = {};
     if (!s) return out;
-    const re = /\b(fs|vd|vf|vde|vdae|vfa|vfao)\s*(?::|=)?\s*(-?(?:\d+(?:\.\d*)?|\.\d+))/gi;
+    const re = /\b(fs|vd|vf|vde|vdae|vfa|vfao|slide|port|portamento|pt)\s*(?::|=)?\s*(auto|-?(?:\d+(?:\.\d*)?|\.\d+))/gi;
     let m;
     while ((m = re.exec(s)) !== null) {
-      const key = m[1].toLowerCase() === "vdae" ? "vde" : m[1].toLowerCase();
-      out[key] = parseFloat(m[2]);
+      const rawKey = m[1].toLowerCase();
+      const key = rawKey === "vdae" ? "vde" : rawKey;
+      const rawValue = m[2].trim();
+      out[key] = /^auto$/i.test(rawValue) ? "auto" : parseFloat(rawValue);
     }
     return out;
   };
@@ -402,6 +423,10 @@ const stopPreview = () => {
     if (Number.isFinite(settings.vde)) p.vibDelay = settings.vde;
     if (Number.isFinite(settings.vfa)) p.vibFadeIn = settings.vfa;
     if (Number.isFinite(settings.vfao)) p.vibFadeOut = settings.vfao;
+    if (settings.slide != null) p.slideTime = settings.slide;
+    if (settings.portamento != null) p.portamento = settings.portamento;
+    if (settings.port != null) p.portamento = settings.port;
+    if (settings.pt != null) p.portamento = settings.pt;
     p.vibratoOverride = Number.isFinite(settings.vf) || Number.isFinite(settings.vd) ||
       Number.isFinite(settings.vde) || Number.isFinite(settings.vfa) || Number.isFinite(settings.vfao) ||
       vibFreqHz !== null || vibDelayBeats !== null || vibFadeInBeats !== null || vibSpeedBeats !== null;
@@ -413,7 +438,7 @@ const stopPreview = () => {
 
     const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+(?:\s+[a-zA-Z']+)*)\s*<\s*([^>]+)\s*>/gi;
     const result = [];
-    const defaultSettings = { fs: 1, vd: null, vf: null, vde: null, vfa: null, vfao: null };
+    const defaultSettings = { fs: 1, vd: null, vf: null, vde: null, vfa: null, vfao: null, slide: null, portamento: null };
     let persistentSettings = { ...defaultSettings };
     let currentPitch = noteToFreq("C4");
     let match;
@@ -544,8 +569,11 @@ const stopPreview = () => {
     return buffer;
   };
 
-  // Kept for back-compat, but now defaults to WHITE (unvoiced).
-  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09) => createPinkNoiseBuffer(ctx, duration, amp);
+  // Whisper should preserve the natural noise color of each phoneme: white for
+  // unvoiced fricatives/bursts, pink for voiced/aspirated noise.
+  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09, { voiced = false } = {}) => {
+    return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
+  };
 
   // Pick noise type by phonation.
   // voiced fricatives/aspiration => pink
@@ -722,7 +750,7 @@ const stopPreview = () => {
   };
 
   // synthesize with nasal-aware transitions and humanizing features
-  const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1, globalVibFadeIn = 0) => {
+  const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, portamento = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1, globalVibFadeIn = 0) => {
     // Preprocess phonemeSeq for humanizing features
     const processedSeq = [];
     for (let i = 0; i < phonemeSeq.length; i++) {
@@ -939,13 +967,15 @@ const stopPreview = () => {
 
 
     // consonant noise generator with subtle fade-in
-      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0, fadeToSilence = false, fadeInRatio = 0) => {
+      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0, fadeToSilence = false, fadeInRatio = 0, voiced = false) => {
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
-        // unvoiced fricatives/bursts => WHITE
+        // White noise for unvoiced fricatives/bursts, pink for voiced breathy
+        // variants such as v/dh/z. This must respect the phoneme metadata,
+        // especially when whisper mode is enabled and when the filter is disabled.
       // quiet base so voice dominates (fixes nasal artifact audibility)
       // amp param is used only for envelope peak.
-      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: false, amp: 0.08 * noiseAmp });
+      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced, amp: 0.08 * noiseAmp });
 
 
       const consonantGain = ctx.createGain();
@@ -964,16 +994,20 @@ const stopPreview = () => {
       } else {
         consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp * fadeEndRatio, t + d);
       }
-      const consonantFilters = fArr.map(freq => {
+      const consonantFilters = !disableFormantFilter && fArr ? fArr.map(freq => {
         const bf = ctx.createBiquadFilter();
         bf.type = "bandpass";
         bf.Q.value = 20;
         bf.frequency.value = freq || 0;
         bf.connect(master);
         return bf;
-      });
+      }) : [];
       src.connect(consonantGain);
-      for (const bf of consonantFilters) consonantGain.connect(bf);
+      if (consonantFilters.length > 0) {
+        for (const bf of consonantFilters) consonantGain.connect(bf);
+      } else {
+        consonantGain.connect(master);
+      }
       src.start(t);
       src.stop(t + d + 0.005);
     };
@@ -1001,11 +1035,13 @@ const stopPreview = () => {
 
     const playWhisperNoise = (t, d, f, opt = {}, fadeInRatio = 0) => {
       if (d <= 0) return;
-      const noiseAmp = opt.noiseAmp ?? 1;
+      const config = typeof opt === "number" ? { noiseAmp: opt } : opt;
+      const noiseAmp = config.noiseAmp ?? 1;
+      const voicedNoise = !!config.voiced;
       const src = ctx.createBufferSource();
-      src.buffer = createWhisperNoiseBuffer(ctx, d, 0.08 * noiseAmp);
+      src.buffer = createWhisperNoiseBuffer(ctx, d, 0.08 * noiseAmp, { voiced: voicedNoise });
       const gain = ctx.createGain();
-      const amp = (opt.amp ?? 0.9) * noiseAmp;
+      const amp = (config.amp ?? 0.9) * noiseAmp;
       gain.gain.setValueAtTime(0, t);
       const fadeInDuration = fadeInRatio > 0 ? d * fadeInRatio : Math.min(0.01, d);
       gain.gain.linearRampToValueAtTime(amp, t + fadeInDuration);
@@ -1029,7 +1065,7 @@ const stopPreview = () => {
 
       // If current phoneme is consonant/unvoiced or purely breathy/burst -> produce consonant-filtered noise
       if (opt.breathy || opt.burst) {
-        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, (opt.key === "s" || opt.key === "ch" || opt.key === "sh" || opt.key === "z" ) ? 0.5 : 0);
+        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, (opt.key === "s" || opt.key === "ch" || opt.key === "sh" || opt.key === "z" ) ? 0.5 : 0, Boolean(voiced));
         // If it's not voiced at all, we're done
         if (!voiced) return;
       }
@@ -1180,13 +1216,19 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         lfol.stop(t + d + 0.02);
       }
 
-      // slide: only when immediate next (direct next) is voiced and slideTime > 0
-      const canSlide = slideTime > 0 && immediateNext && immediateNext.voiced && immediateNext.pitch && voiced;
+      // slide happens near the end of the current note; portamento only corrects
+      // the remaining 10% during the following note's duration.
+      const effectiveSlideTime = resolvePortamento(opt.slideTime ?? slideTime, slideTime, d);
+      const effectivePortamento = resolvePortamento(opt.portamento ?? portamento, portamento, d);
+      const canSlide = effectiveSlideTime > 0 && immediateNext && immediateNext.voiced && immediateNext.pitch && voiced;
       if (canSlide) {
-        const rampStart = Math.max(t, t + d - slideTime);
+        const rampStart = Math.max(t, t + d - effectiveSlideTime);
+        const slideTarget = effectivePortamento > 0
+          ? pitch + 0.9 * (immediateNext.pitch - pitch)
+          : immediateNext.pitch;
         pitchParam.setValueAtTime(pitch, t);
         pitchParam.setValueAtTime(pitch, rampStart);
-        pitchParam.linearRampToValueAtTime(immediateNext.pitch, t + d);
+        pitchParam.linearRampToValueAtTime(slideTarget, t + d);
       } else {
         pitchParam.setValueAtTime(pitch, t);
       }
@@ -1264,12 +1306,13 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
           whisperRunStart = true;
         } else {
           scheduleWhisperFormants(t, p.d, p.f, p, nextVoiced, whisperRunStart);
-          playWhisperNoise(t, p.d, p, p.key === "s" ? 0.5 : 0);
+          const whisperNoiseVoiced = !!p.voiced;
+          playWhisperNoise(t, p.d, p, { amp: p.amp ?? 0.9, noiseAmp: p.noiseAmp ?? 1, voiced: whisperNoiseVoiced }, p.key === "s" ? 0.5 : 0);
           whisperRunStart = false;
         }
       } else if (p.voiced) {
         if (p.burst) {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0);
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0, Boolean(p.voiced));
         }
         const isRunStart = !currentOsc;
         if (!currentOsc) {
@@ -1292,7 +1335,16 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
 
         // schedule pitch
         const pitchParam = currentOsc.frequency;
-        pitchParam.setValueAtTime(p.pitch, t);
+        const prevVoiced = i > 0 ? processedSeq[i - 1] : null;
+        const effectiveSlideTime = resolvePortamento(p.slideTime ?? slideTime, slideTime, p.d);
+        const effectivePortamento = resolvePortamento(p.portamento ?? portamento, portamento, p.d);
+        const shouldPortamentoThisNote = effectivePortamento > 0 && prevVoiced && prevVoiced.voiced && prevVoiced.pitch && p.voiced && p.pitch;
+        if (shouldPortamentoThisNote) {
+          pitchParam.setValueAtTime(p.pitch * 0.9, t);
+          pitchParam.linearRampToValueAtTime(p.pitch, t + Math.min(p.d, effectivePortamento));
+        } else {
+          pitchParam.setValueAtTime(p.pitch, t);
+        }
 
         // vibrato — per-phoneme aware: uses p.vib* fields from bracket overrides,
         // falls back to global parameters. Handles persistent LFO connect/disconnect
@@ -1350,15 +1402,17 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
           lfol.stop(t + p.d + 0.02);
         }
 
-        // slide
-        const canSlide = slideTime > 0 && immediateNext && immediateNext.voiced && immediateNext.pitch && p.voiced;
+        // slide happens near the end of the current note; if portamento is active,
+        // it only fills the remaining 10% of the target pitch during the next note's duration.
+        const canSlide = effectiveSlideTime > 0 && immediateNext && immediateNext.voiced && immediateNext.pitch && p.voiced;
         if (canSlide) {
-          const rampStart = Math.max(t, t + p.d - slideTime);
+          const rampStart = Math.max(t, t + p.d - effectiveSlideTime);
+          const slideTarget = effectivePortamento > 0
+            ? p.pitch + 0.9 * (immediateNext.pitch - p.pitch)
+            : immediateNext.pitch;
           pitchParam.setValueAtTime(p.pitch, t);
           pitchParam.setValueAtTime(p.pitch, rampStart);
-          pitchParam.linearRampToValueAtTime(immediateNext.pitch, t + p.d);
-        } else {
-          pitchParam.setValueAtTime(p.pitch, t);
+          pitchParam.linearRampToValueAtTime(slideTarget, t + p.d);
         }
 
         // update lastVoicedEnd
@@ -1446,7 +1500,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
 
         // play consonant noise
         if (!p.voiced || mode === "whisper") {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0);
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0, Boolean(p.voiced));
         }
       }
 
@@ -1627,7 +1681,8 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
     <div style="margin-top:6px">
       <label>Formant Morph time (s): <input type="number" id="morphTime" value="0.06" step="0.01" style="width:80px"/></label>
       <label style="margin-left:8px"><input type="checkbox" id="enableMorph" checked/> Enable Morph</label>
-      <label style="margin-left:8px">Slide time (s): <input type="number" id="slideTime" value="0.08" step="0.01" style="width:80px"/></label>
+      <label style="margin-left:8px">Slide (s): <input type="text" id="slideTime" value="0.08" style="width:80px"/></label>
+      <label style="margin-left:8px">Portamento (s; Auto=50%): <input type="text" id="portamento" value="0.08" style="width:100px"/></label>
     </div>
     <div style="margin-top:6px">
       <label><input type="checkbox" id="useCMU"/> Use CMUDict</label>
@@ -1708,7 +1763,6 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
   syntaxHelp.innerHTML = `
     <div id="syntaxHelpHeader" style="display:flex;align-items:center;gap:6px;padding:7px 8px;background:#f2f2f2;border-bottom:1px solid #ccc;cursor:grab;user-select:none;touch-action:none;">
       <b style="flex:1;">Syntax Help</b>
-      <button id="syntaxRotate" type="button" title="Drag header to rotate" style="padding:1px 5px;">R</button>
       <button id="syntaxCollapse" type="button" title="Collapse help" style="padding:1px 5px;">-</button>
       <button id="syntaxClose" type="button" title="Close help" style="padding:1px 5px;">x</button>
     </div>
@@ -1738,11 +1792,10 @@ vibFadeIn, vibSpeed</pre>
 
   const syntaxHeader = syntaxHelp.querySelector("#syntaxHelpHeader");
   const syntaxBody = syntaxHelp.querySelector("#syntaxHelpBody");
-  const syntaxRotate = syntaxHelp.querySelector("#syntaxRotate");
   const syntaxCollapse = syntaxHelp.querySelector("#syntaxCollapse");
   const syntaxClose = syntaxHelp.querySelector("#syntaxClose");
   let syntaxRotation = 0;
-  let syntaxRotateMode = false;
+  let syntaxRotationVelocity = 0;
   let syntaxDrag = null;
   let syntaxDragFrame = null;
 
@@ -1759,11 +1812,18 @@ vibFadeIn, vibSpeed</pre>
     });
   };
 
-  syntaxRotate.addEventListener("click", () => {
-    syntaxRotateMode = !syntaxRotateMode;
-    syntaxRotate.style.background = syntaxRotateMode ? "#ddd" : "";
-    syntaxHeader.style.cursor = syntaxRotateMode ? "crosshair" : "grab";
-  });
+  const animateSyntaxPanel = () => {
+    if (!syntaxDrag) {
+      syntaxRotationVelocity *= 0.9;
+      if (Math.abs(syntaxRotationVelocity) < 0.08) syntaxRotationVelocity = 0;
+      syntaxRotation += syntaxRotationVelocity;
+      if (Math.abs(syntaxRotation) < 0.05) syntaxRotation = 0;
+      scheduleSyntaxPanelUpdate(null, null);
+    }
+    requestAnimationFrame(animateSyntaxPanel);
+  };
+  requestAnimationFrame(animateSyntaxPanel);
+
   syntaxCollapse.addEventListener("click", () => {
     const collapsed = syntaxBody.style.display === "none";
     syntaxBody.style.display = collapsed ? "block" : "none";
@@ -1784,19 +1844,33 @@ vibFadeIn, vibSpeed</pre>
     const rect = syntaxHelp.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    syntaxDrag = syntaxRotateMode
-      ? { rotate: true, centerX, centerY, startAngle: Math.atan2(event.clientY - centerY, event.clientX - centerX), startRotation: syntaxRotation }
-      : { rotate: false, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+    const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
+    syntaxDrag = {
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      centerX,
+      centerY,
+      lastAngle: angle,
+      lastTime: performance.now()
+    };
     event.preventDefault();
   });
   syntaxHeader.addEventListener("pointermove", (event) => {
     if (!syntaxDrag) return;
-    if (syntaxDrag.rotate) {
-      syntaxRotation = syntaxDrag.startRotation + (Math.atan2(event.clientY - syntaxDrag.centerY, event.clientX - syntaxDrag.centerX) - syntaxDrag.startAngle) * 180 / Math.PI;
-      scheduleSyntaxPanelUpdate(null, null);
-    } else {
-      scheduleSyntaxPanelUpdate(event.clientX - syntaxDrag.offsetX, event.clientY - syntaxDrag.offsetY);
-    }
+    const rect = syntaxHelp.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
+    const deltaAngle = (angle - syntaxDrag.lastAngle) * 180 / Math.PI;
+    const now = performance.now();
+    const dt = Math.max(16, now - syntaxDrag.lastTime);
+    syntaxRotation += deltaAngle;
+    syntaxRotationVelocity = (deltaAngle / dt) * 1000 * 0.7;
+    syntaxDrag.lastAngle = angle;
+    syntaxDrag.lastTime = now;
+    const left = event.clientX - syntaxDrag.offsetX;
+    const top = event.clientY - syntaxDrag.offsetY;
+    scheduleSyntaxPanelUpdate(left, top);
   });
   syntaxHeader.addEventListener("pointerup", () => { syntaxDrag = null; });
   syntaxHeader.addEventListener("pointercancel", () => { syntaxDrag = null; });
@@ -2189,7 +2263,10 @@ vibFadeIn, vibSpeed</pre>
       const persistentVib = !!container.querySelector("#persistentVib").checked;
       const morphTime = Math.max(0, parseFloat(container.querySelector("#morphTime").value) || 0.06);
       const enableMorph = !!container.querySelector("#enableMorph").checked;
-      const slideTime = Math.max(0, parseFloat(container.querySelector("#slideTime").value) || 0.08);
+      const slideValue = (container.querySelector("#slideTime")?.value ?? "0.08").trim();
+      const portamentoValue = (container.querySelector("#portamento")?.value ?? "0.08").trim();
+      const slideTime = slideValue === "" ? 0.08 : resolvePortamento(slideValue, 0.08, 0.08);
+      const portamento = portamentoValue === "" ? 0.08 : resolvePortamento(portamentoValue, 0.08, 0.08);
 
       const phonemeSeq = await parseInput(text, beatLen, gridType, stepsPerBeat);
       if (!phonemeSeq || phonemeSeq.length === 0) { statusEl.textContent = "Parsed no phonemes â€” check input."; return; }
@@ -2198,7 +2275,7 @@ vibFadeIn, vibSpeed</pre>
       statusEl.textContent = `Rendering ${totalDuration.toFixed(2)}s...`;
       const offlineCtx = new OfflineAudioContext(1, Math.ceil(totalDuration * sampleRate) + 128, sampleRate);
 
-      const renderedBuffer = await synthesize(offlineCtx, phonemeSeq, mode, vibratoFreq, vibratoDepth, vibratoDelay, morphTime, enableMorph, slideTime, persistentVib, dynamicMode, consonantDuration, vibratoFadeIn);
+      const renderedBuffer = await synthesize(offlineCtx, phonemeSeq, mode, vibratoFreq, vibratoDepth, vibratoDelay, morphTime, enableMorph, slideTime, portamento, persistentVib, dynamicMode, consonantDuration, vibratoFadeIn);
       statusEl.textContent = "Done";
 
       // WAV creation & preview
