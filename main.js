@@ -1340,8 +1340,11 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         const effectivePortamento = resolvePortamento(p.portamento ?? portamento, portamento, p.d);
         const shouldPortamentoThisNote = effectivePortamento > 0 && prevVoiced && prevVoiced.voiced && prevVoiced.pitch && p.voiced && p.pitch;
         if (shouldPortamentoThisNote) {
-          pitchParam.setValueAtTime(p.pitch * 0.9, t);
-          pitchParam.linearRampToValueAtTime(p.pitch, t + Math.min(p.d, effectivePortamento));
+          const prevPitch = prevVoiced.pitch;
+          const blendDuration = Math.min(p.d, Math.max(0.015, Math.min(effectivePortamento, p.d * 0.5)));
+          pitchParam.setValueAtTime(prevPitch, t);
+          pitchParam.linearRampToValueAtTime(p.pitch, t + blendDuration);
+          pitchParam.setValueAtTime(p.pitch, t + blendDuration);
         } else {
           pitchParam.setValueAtTime(p.pitch, t);
         }
