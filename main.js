@@ -68,6 +68,18 @@ const stopPreview = () => {
     return normalizePortamento(value, noteDuration);
   };
 
+  const getPortamentoStartPitch = (previous, current) => {
+    if (!previous || !current || !previous.pitchIsNote || !current.pitchIsNote) {
+      return previous && current && !previous.pitchIsNote && !current.pitchIsNote && previous.pitch - current.pitch >= 50
+        ? current.pitch - 10
+        : previous?.pitch;
+    }
+    const downwardSemitones = 12 * Math.log2(previous.pitch / current.pitch);
+    return downwardSemitones >= 4
+      ? current.pitch * Math.pow(2, -1 / 12)
+      : previous.pitch;
+  };
+
   // personal dictionary persistence functions
   function savePersonalDict() {
     try {
@@ -400,11 +412,11 @@ const stopPreview = () => {
   const parseBracketSettings = (s) => {
     const out = {};
     if (!s) return out;
-    const re = /\b(fs|vd|vf|vde|vdae|vfa|vfao|slide|port|portamento|pt)\s*(?::|=)?\s*(auto|-?(?:\d+(?:\.\d*)?|\.\d+))/gi;
+    const re = /\b(fs|vd|vf|vde|vdae|vfa|vfao|sl|slide|fm|fmorph|port|portamento|pt)\s*(?::|=)?\s*(auto|-?(?:\d+(?:\.\d*)?|\.\d+))/gi;
     let m;
     while ((m = re.exec(s)) !== null) {
       const rawKey = m[1].toLowerCase();
-      const key = rawKey === "vdae" ? "vde" : rawKey;
+      const key = rawKey === "vdae" ? "vde" : rawKey === "sl" ? "slide" : rawKey === "fm" ? "fmorph" : rawKey;
       const rawValue = m[2].trim();
       out[key] = /^auto$/i.test(rawValue) ? "auto" : parseFloat(rawValue);
     }
@@ -424,6 +436,10 @@ const stopPreview = () => {
     if (Number.isFinite(settings.vfa)) p.vibFadeIn = settings.vfa;
     if (Number.isFinite(settings.vfao)) p.vibFadeOut = settings.vfao;
     if (settings.slide != null) p.slideTime = settings.slide;
+    if (settings.fmorph != null) {
+      p.morphTime = settings.fmorph;
+      p.morphEnabled = settings.fmorph > 0;
+    }
     if (settings.portamento != null) p.portamento = settings.portamento;
     if (settings.port != null) p.portamento = settings.port;
     if (settings.pt != null) p.portamento = settings.pt;
@@ -438,9 +454,10 @@ const stopPreview = () => {
 
     const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+(?:\s+[a-zA-Z']+)*)\s*<\s*([^>]+)\s*>/gi;
     const result = [];
-    const defaultSettings = { fs: 1, vd: null, vf: null, vde: null, vfa: null, vfao: null, slide: null, portamento: null };
+    const defaultSettings = { fs: 1, vd: null, vf: null, vde: null, vfa: null, vfao: null, slide: null, fmorph: null, portamento: null };
     let persistentSettings = { ...defaultSettings };
     let currentPitch = noteToFreq("C4");
+    let currentPitchIsNote = true;
     let match;
     while ((match = regex.exec(text)) !== null) {
       const bracketText = match[1] || "";
@@ -457,7 +474,10 @@ const stopPreview = () => {
       if (!Number.isFinite(units)) continue;
       if (hasExplicitPitch) {
         const parsedPitch = noteToFreq(pitchRaw);
-        if (Number.isFinite(parsedPitch)) currentPitch = parsedPitch;
+        if (Number.isFinite(parsedPitch)) {
+          currentPitch = parsedPitch;
+          currentPitchIsNote = /^([A-Ga-g])([#b]?)\d$/.test(pitchRaw);
+        }
       }
       const pitch = currentPitch;
 
@@ -477,7 +497,7 @@ const stopPreview = () => {
 
       // exact phoneme key match
       if (!hasSeparatedPhonemes && phonemeMap[token]) {
-        let p = { key: token, ...phonemeMap[token], d: dur, pitch };
+        let p = { key: token, ...phonemeMap[token], d: dur, pitch, pitchIsNote: currentPitchIsNote };
         p.f = getAdjustedFormants(p.f);
         if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -509,7 +529,7 @@ const stopPreview = () => {
         const partDur = partDurations[partIndex];
         const key = part.toLowerCase();
         if (phonemeMap[key]) {
-          let p = { key, ...phonemeMap[key], d: partDur, pitch, dynamicDurationApplied: dynamicMode };
+          let p = { key, ...phonemeMap[key], d: partDur, pitch, pitchIsNote: currentPitchIsNote, dynamicDurationApplied: dynamicMode };
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -524,7 +544,7 @@ const stopPreview = () => {
             ng: "ng", er: "er", oy: "oy", aw: "aw"
           };
           const fm = (fallbackMap[key] || "rest");
-          let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch, dynamicDurationApplied: dynamicMode };
+          let p = { key: fm, ...phonemeMap[fm], d: partDur, pitch, pitchIsNote: currentPitchIsNote, dynamicDurationApplied: dynamicMode };
           p.f = getAdjustedFormants(p.f);
           if (p.morphTo) p.morphTo = getAdjustedFormants(p.morphTo);
 
@@ -1216,15 +1236,14 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         lfol.stop(t + d + 0.02);
       }
 
-      // slide happens near the end of the current note; portamento only corrects
-      // the remaining 10% during the following note's duration.
+      // Slide reaches halfway to the next pitch; portamento completes the rest.
       const effectiveSlideTime = resolvePortamento(opt.slideTime ?? slideTime, slideTime, d);
       const effectivePortamento = resolvePortamento(opt.portamento ?? portamento, portamento, d);
       const canSlide = effectiveSlideTime > 0 && immediateNext && immediateNext.voiced && immediateNext.pitch && voiced;
       if (canSlide) {
         const rampStart = Math.max(t, t + d - effectiveSlideTime);
         const slideTarget = effectivePortamento > 0
-          ? pitch + 0.9 * (immediateNext.pitch - pitch)
+          ? pitch + 0.5 * (immediateNext.pitch - pitch)
           : immediateNext.pitch;
         pitchParam.setValueAtTime(pitch, t);
         pitchParam.setValueAtTime(pitch, rampStart);
@@ -1338,11 +1357,18 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         const prevVoiced = i > 0 ? processedSeq[i - 1] : null;
         const effectiveSlideTime = resolvePortamento(p.slideTime ?? slideTime, slideTime, p.d);
         const effectivePortamento = resolvePortamento(p.portamento ?? portamento, portamento, p.d);
+        const prevSlideTarget = prevVoiced && prevVoiced.voiced && prevVoiced.pitch && p.voiced && p.pitch
+          ? prevVoiced.pitch + 0.5 * (p.pitch - prevVoiced.pitch)
+          : null;
+        const prevPitchForPortamento = (prevVoiced && prevVoiced.voiced && prevVoiced.pitch && p.voiced && p.pitch && effectivePortamento > 0)
+          ? (prevSlideTarget && resolvePortamento(prevVoiced.slideTime ?? slideTime, slideTime, prevVoiced.d) > 0
+            ? prevSlideTarget
+            : getPortamentoStartPitch(prevVoiced, p))
+          : p.pitch;
         const shouldPortamentoThisNote = effectivePortamento > 0 && prevVoiced && prevVoiced.voiced && prevVoiced.pitch && p.voiced && p.pitch;
         if (shouldPortamentoThisNote) {
-          const prevPitch = prevVoiced.pitch;
           const blendDuration = Math.min(p.d, Math.max(0.015, Math.min(effectivePortamento, p.d * 0.5)));
-          pitchParam.setValueAtTime(prevPitch, t);
+          pitchParam.setValueAtTime(prevPitchForPortamento, t);
           pitchParam.linearRampToValueAtTime(p.pitch, t + blendDuration);
           pitchParam.setValueAtTime(p.pitch, t + blendDuration);
         } else {
@@ -1405,13 +1431,12 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
           lfol.stop(t + p.d + 0.02);
         }
 
-        // slide happens near the end of the current note; if portamento is active,
-        // it only fills the remaining 10% of the target pitch during the next note's duration.
+        // Slide reaches halfway to the next pitch; portamento completes the rest.
         const canSlide = effectiveSlideTime > 0 && immediateNext && immediateNext.voiced && immediateNext.pitch && p.voiced;
         if (canSlide) {
           const rampStart = Math.max(t, t + p.d - effectiveSlideTime);
           const slideTarget = effectivePortamento > 0
-            ? p.pitch + 0.9 * (immediateNext.pitch - p.pitch)
+            ? p.pitch + 0.5 * (immediateNext.pitch - p.pitch)
             : immediateNext.pitch;
           pitchParam.setValueAtTime(p.pitch, t);
           pitchParam.setValueAtTime(p.pitch, rampStart);
@@ -1778,6 +1803,13 @@ rest &lt;0.25&gt;</pre>
 e &lt;1&gt;   settings continue here
 [reset] i &lt;1&gt;   restore defaults</pre>
     <div>Settings also accept <code>fs=1.2</code> or <code>fs 1.2</code>. <code>vdae</code> is accepted as an alias for <code>vde</code>.</div>
+    <div style="margin-top:6px;"><b>Pitch and formant settings</b></div>
+    <pre style="white-space:pre-wrap;margin:4px 0 8px;">[sl:0.12] a &lt;C4,1&gt;   slide time (same as slide)
+  [fm:0.2] e &lt;1&gt;      formant morph time (same as fmorph)
+  [port:0.08] i &lt;1&gt;   portamento time
+  [port:auto] o &lt;1&gt;   half of this token's duration</pre>
+    <div>These bracket settings apply to the following token and persist until changed or <code>[reset]</code>. Use <code>sl</code>/<code>slide</code>, <code>fm</code>/<code>fmorph</code>, or <code>port</code>/<code>portamento</code>/<code>pt</code>.</div>
+    <div style="margin-top:6px;">With portamento on, slide moves halfway toward the next pitch before portamento finishes the transition. Downward note changes of 4+ semitones start one semitone below the target; raw frequencies dropping by 50+ Hz start 10 Hz below the target.</div>
     <div style="margin-top:6px;"><b>Per-note fields</b></div>
     <pre style="white-space:pre-wrap;margin:4px 0 0;">a &lt;C4,1,6,0.1,0.2,4&gt;
 pitch, duration, vibFreq, vibDelay,
