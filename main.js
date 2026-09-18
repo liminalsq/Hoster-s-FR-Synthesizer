@@ -10,7 +10,7 @@
   // personal dictionary and dynamic mode
   let personalDict = {}; // word -> [phoneme1, phoneme2, ...]
   let dynamicMode = false;
-  let consonantDuration = 0.1;
+  let consonantDuration = 0.05;
 
 // phonemeMap entries carry 6 formants (F4-F6 ignored by the 3-filter engine).
   // morphTo checks must accept all 6 so diphthongs keep working.
@@ -33,6 +33,7 @@
   let lastRenderedPhonemes = null;
 
 const stopPreview = () => {
+  stopVisualAnim();
     if (prevSrc) {
       try {
         prevSrc.onended = null;
@@ -195,17 +196,21 @@ const stopPreview = () => {
     // --- CONSONANTS & SIBILANTS ---
     h:  { f: [750,  1750, 3150, 3800, 4800, 5800], breathy: true, amp: 0.9, voiced: false, noiseAmp: 1 },
     s:  { f: [320, 1390, 5500, 5900, 6800, 7800], breathy: true, amp: 1.4, voiced: false, noiseAmp: 1 },
-    z:  { f: [240, 1390, 5500, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.35 },
+    z:  { f: [240, 1390, 5500, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.185 },
     zh: { f: [270, 1840, 2750, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.2 },
     t:  { f: [400,  1600, 2600, 4900, 5900, 6900], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
     d:  { f: [200,  1600, 2600, 3800, 4800, 5800], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: 0.2, morphs: false },
+    dx:  { f: [200,  1600, 2600, 3800, 4800, 5800], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: 0.02, morphs: false },
     k:  { f: [300, 1990, 2850, 4100, 5100, 6100], burst: true, short: true, voiced: false, noiseAmp: 1 },
     g:  { f: [200,  1990, 2850, 3600, 4600, 5600], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.3, morphs: false },
+    gx:  { f: [200,  1990, 2850, 3600, 4600, 5600], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.035, morphs: false },
+
 
     // --- NASALS & PLOSIVES/FRICATIVES ---
     n:  { f: [270,  1340, 2470, 3400, 4400, 5400], voiced: true, nasal: true, noiseAmp: 1 },
     m:  { f: [270,  1270, 2130, 3300, 4300, 5300], voiced: true, nasal: true, noiseAmp: 1 },
     b:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.35, morphs: false },
+    bx:  { f: [200,  1100, 2150, 3400, 4400, 5400], breathy: true, burst: true, voiced: true, short: true, noiseAmp: 0.035, morphs: false },
     p:  { f: [400,  1100, 2150, 3600, 4600, 5600], burst: true, short: true, voiced: false, noiseAmp: 1 },
     f:  { f: [1150, 2950, 4950, 5900, 6800, 7800], breathy: true, voiced: false, noiseAmp: 1 },
     v:  { f: [220,  1100, 2080, 4200, 5200, 6200], breathy: true, voiced: true, noiseAmp: 0.225, amp: 0.575 },
@@ -289,7 +294,8 @@ const stopPreview = () => {
 
   const DYNAMIC_CONSONANTS = new Set([
     "h", "n", "m", "s", "z", "t", "d", "r", "l", "b", "p", "k", "g",
-    "f", "v", "w", "y", "th", "dh", "sh", "ch", "jh", "ng"
+    "f", "v", "w", "y", "th", "dh", "sh", "ch", "jh", "ng", "dx", "gx", "bx",
+    "zh",
   ]);
 
   function arpabetToKeys(arpArr) {
@@ -615,42 +621,53 @@ const stopPreview = () => {
   // the correct phase relationships between harmonics (a real glottal source has
   // roughly -12 dB/octave roll-off plus a characteristic phase dispersion that a
   // naive 1/n^2 cosine series cannot reproduce).
-  const createRosenbergGlottalWave = (ctx, numHarmonics = 27, openQuotient = 0.55, returnQuotient = 0.2) => {
+  const createRosenbergGlottalWave = (
+    ctx, 
+    numHarmonics = 27, 
+    openQuotient = 0.55, 
+    returnQuotient = 0.2,
+    vocalEffort = 0.8, // Increased default effort level
+  ) => {
     const nH = Math.max(1, numHarmonics | 0);
     const real = new Float32Array(nH);
     const imag = new Float32Array(nH);
 
-    // Clamp input parameters to standard physiological boundaries
-    const OQ = Math.min(0.95, Math.max(0.1, openQuotient));
-    const RQ = Math.min(0.4, Math.max(0.02, returnQuotient));
+    // Clamp effort between 0 (softest) and 1 (highest effort)
+    const effort = Math.min(1.0, Math.max(0.0, vocalEffort));
 
-    // Myriad Model Parameters:
-    // 1. Peak Glottal Flow asymmetry ratio (alpha)
+    // High vocal effort causes:
+    // 1. Shorter open quotient (OQ drops down toward ~0.35)
+    // 2. Faster glottal closure / lower return quotient (RQ drops toward ~0.03)
+    const OQ = Math.min(0.95, Math.max(0.1, openQuotient * (1.0 - 0.35 * effort)));
+    const RQ = Math.min(0.4, Math.max(0.02, returnQuotient * (1.0 - 0.7 * effort)));
+
+    // Peak Glottal Flow asymmetry ratio
     const alpha = 1.0 / (1.0 - OQ); 
-    
-    // 2. Corner frequency attenuation factor (spectral tilt / spectral slope factor in dB/octave)
-    // Higher return quotient = stronger spectral attenuation at higher harmonics
+
+    // Corner frequency cutoff shifts higher with effort (less spectral tilt attenuation)
     const spectralTiltCutoff = 1.0 / (2.0 * Math.PI * RQ);
 
+    // High effort reduces the steepness of the spectral slope (roll-off drops from ~1.05 to ~0.55)
+    const spectralSlopeExponent = 1.05 - (0.50 * effort);
+
     for (let k = 1; k < nH; k++) {
-      // Basic Rosenberg-C / LF harmonic envelope magnitude decay (~ -6 dB/octave base, modified by tilt)
-      // H(k) magnitude model: k / (1 + (k / kc)^2)
       const normalizedFreq = k / (nH * 0.5);
+      
+      // Spectral tilt filter (corner frequency shifts higher under effort)
       const tiltAttenuation = 1.0 / (1.0 + Math.pow(k / spectralTiltCutoff, 2));
       
-      // Direct spectral magnitude calculation
-      const mag = (1.0 / Math.pow(k, 1.05)) * tiltAttenuation;
+      // Boosted magnitude for high harmonics under greater effort
+      const mag = (1.0 / Math.pow(k, spectralSlopeExponent)) * tiltAttenuation;
 
-      // Asymmetric Phase alignment (controls the sharpness of the closing phase)
-      // Phase offset is determined by harmonic index and Open Quotient
+      // Asymmetric Phase alignment (sharper excitation peak)
       const phase = -Math.PI * k * OQ * (1.0 - 0.25 * alpha * normalizedFreq);
 
-      // Convert Polar (Magnitude, Phase) -> Rectangular (Real, Imaginary)
+      // Convert Polar -> Rectangular
       real[k] = mag * Math.cos(phase);
       imag[k] = mag * Math.sin(phase);
     }
 
-    // Normalize against fundamental (F0) magnitude so energy remains constant
+    // Normalize against fundamental (F0) magnitude so energy remains predictable
     const f0mag = Math.hypot(real[1], imag[1]) || 1;
     for (let k = 1; k < nH; k++) {
       real[k] /= f0mag;
@@ -995,7 +1012,7 @@ const stopPreview = () => {
         // especially when whisper mode is enabled and when the filter is disabled.
       // quiet base so voice dominates (fixes nasal artifact audibility)
       // amp param is used only for envelope peak.
-      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced, amp: 0.08 * noiseAmp });
+      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced, amp: 0.015 * noiseAmp });
 
 
       const consonantGain = ctx.createGain();
@@ -1636,13 +1653,13 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       </div>
     -->
     <div id="visualFrame" style="position:fixed; top:10px; right:10px; width:240px; height:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
-      <div style="font-weight:bold; text-align:center; font-size:13px; border-bottom:1px solid #ccc; padding-bottom:2px;">Visual</div>
+      <div style="display:flex;align-items:center;border-bottom:1px solid #ccc;padding-bottom:2px;"><b style="flex:1;text-align:center;font-size:13px;">Visual</b><button id="closeVisualBtn" type="button" title="Close visual">close visual</button></div>
       <canvas id="visualCanvas" width="210" height="140" style="display:block; margin:4px auto;"></canvas>
       <div id="visualFormants" style="text-align:center; font-size:11px; margin-top:4px;">F1: 0&nbsp;&nbsp;F2: 0&nbsp;&nbsp;F3: 0</div>
       <div id="visualPhone" style="text-align:center; font-size:11px; margin-top:3px;">Current Phone: None</div>
     </div>
     <div id="experimentalPanel" style="position:fixed; top:258px; right:10px; width:240px; border:2px solid #333; background:#fff; border-radius:6px; box-sizing:border-box; padding:6px; font-family:monospace; z-index:10;">
-      <div style="font-weight:bold; text-align:center; font-size:12px; border-bottom:1px solid #ccc; padding-bottom:2px;">Experimental/Useless/For Fun</div>
+      <div style="display:flex;align-items:center;border-bottom:1px solid #ccc;padding-bottom:2px;"><b style="flex:1;text-align:center;font-size:12px;">Experimental/Useless/For Fun</b><button id="closeExperimentalBtn" type="button" title="Close experimental">close experimental</button></div>
       <div style="margin-top:4px; font-size:11px;">
         <label style="display:flex; align-items:center; gap:6px;">
           <input type="checkbox" id="disableFilters"/>
@@ -1769,13 +1786,26 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         <span style="font-size:12px; font-weight:bold;">Piano Roll</span>
         <div style="font-size:11px;">
           <label><input type="checkbox" id="pianoRollSnap" checked/> Snap to grid</label>
+          <label style="margin-left:6px;">Snap:
+            <select id="pianoRollSnapType" style="font-size:11px;">
+              <option value="0.5">1/2</option>
+              <option value="0.3333333333">1/3</option>
+              <option value="0.25" selected>1/4</option>
+              <option value="0.1666666667">1/6</option>
+              <option value="0.125">1/8</option>
+              <option value="0.0833333333">1/12</option>
+              <option value="0.0625">1/16</option>
+              <option value="0.0416666667">1/24</option>
+              <option value="0.03125">1/32</option>
+            </select>
+          </label>
           <button id="pianoRollRefreshBtn" style="margin-left:6px; padding:2px 6px; font-size:11px;">Refresh from text</button>
         </div>
       </div>
       <div style="display:flex; gap:8px; align-items:flex-start;">
         <div id="pianoRollPanel" style="width:180px; flex:0 0 180px; border:1px solid #ccc; background:#fff; padding:8px; font-size:12px; box-sizing:border-box;"></div>
         <div id="pianoRollContainer" style="position:relative; border:1px solid #999; overflow:auto; width:100%; height:350px; background:#f8f8f8;">
-          <canvas id="pianoRollCanvas" style="display:block;"></canvas>
+          <canvas id="pianoRollCanvas" tabindex="0" style="display:block;"></canvas>
         </div>
       </div>
       <div style="font-size:11px; margin-top:4px; color:#555;">
@@ -2243,9 +2273,10 @@ vibFadeIn, vibSpeed</pre>
       }
 
       // Replace only pitches/durations while keeping existing phoneme keys.
-      // Both explicit <NOTE,duration> and inherited <duration> are accepted.
+      // A token may contain several space-separated phonemes that share one
+      // timing, so keep the whole group together during replacement.
       const parseTokens = (source) => {
-        const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
+        const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+(?:\s+[a-zA-Z']+)*)\s*<\s*([^>]+)\s*>/gi;
         const parsed = [];
         let match;
         while ((match = regex.exec(source)) !== null) {
@@ -2253,7 +2284,7 @@ vibFadeIn, vibSpeed</pre>
           const hasPitch = fields.length > 1;
           parsed.push({
             prefix: match[1] || "",
-            key: match[2],
+            key: match[2].trim(),
             pitch: hasPitch ? fields[0] : null,
             dur: hasPitch ? fields[1] : fields[0]
           });
@@ -2282,7 +2313,19 @@ vibFadeIn, vibSpeed</pre>
       }
 
       phonemeInputEl.value = outTokens.join(" ");
-      statusEl.textContent = "MIDI pitches replaced (phonemes preserved). Ready to synthesize.";
+
+      // If the MIDI timeline contains more segments than the existing text,
+      // append them instead of silently dropping the extra notes. New MIDI
+      // note segments use the default vowel phoneme; rests stay rests.
+      while (midiIdx < midiParsed.length) {
+        const mp = midiParsed[midiIdx++];
+        outTokens.push(`${mp.pitch ? `a <${mp.pitch},${mp.dur}>` : `rest <${mp.dur}>`}`);
+      }
+
+      phonemeInputEl.value = outTokens.join(" ");
+      statusEl.textContent = midiParsed.length > existingTokens.length
+        ? "MIDI pitches replaced; extra MIDI notes appended. Ready to synthesize."
+        : "MIDI pitches replaced (phonemes preserved). Ready to synthesize.";
     } catch (err) {
       console.error(err);
       statusEl.textContent = "MIDI import failed: " + (err.message || err);
@@ -2405,6 +2448,7 @@ prevSrc.onended = () => {
           // natural-end cleanup: free shared preview state so a new preview can start
           prevSrc = null;
           previewBuf = null;
+          stopVisualAnim();
           setVisualIdle();
           if (actx) {
             try { actx.close(); } catch (e) {}
@@ -2425,7 +2469,7 @@ prevSrc.onended = () => {
       outputControls.appendChild(stopBtn);
 
       const exportBtn = document.createElement("button");
-      exportBtn.textContent = "Export Animation (MP4)";
+      exportBtn.textContent = "Export Animation (WebM)";
       exportBtn.style = "margin-top:8px;margin-left:8px;padding:6px 12px;";
       exportBtn.onclick = () => exportAnimationMp4(exportBtn);
       outputControls.appendChild(exportBtn);
@@ -2452,6 +2496,12 @@ prevSrc.onended = () => {
   let floatTime = 0;
   let mouthRotTime = 0;
   let eyesRotTime = 0;
+  let visualTime = 0;
+  let pointerPosition = null;
+  let gazeTarget = { x: 0, y: 0 };
+  let sphereYaw = 0;
+  let spherePitch = 0;
+  let nextGazeShift = 0;
 
   // Smooth mouth height transition state
   let currentMouthH = 4; // Start near closed state
@@ -2464,13 +2514,42 @@ prevSrc.onended = () => {
     timer: 120
   };
 
-  function updateFaceState() {
-    // Main position float speed
-    floatTime += 0.04;
+  function updateFaceState(timeSeconds = null) {
+    if (timeSeconds != null) {
+      visualTime = Math.max(0, timeSeconds);
+      floatTime = visualTime * 2.4;
+      mouthRotTime = visualTime * 0.72;
+      eyesRotTime = visualTime * 1.02;
+    } else {
+      visualTime += 1 / 60;
+      floatTime += 0.04;
+      mouthRotTime += 0.012;
+      eyesRotTime += 0.017;
+    }
 
-    // Independent, slower time counters for rotational drift
-    mouthRotTime += 0.012;
-    eyesRotTime += 0.017;
+    const hasPointer = pointerPosition !== null;
+    if (hasPointer) {
+      const dx = pointerPosition.x - visualCanvas.width / 2;
+      const dy = pointerPosition.y - visualCanvas.height / 2;
+      gazeTarget.x += (clamp(dx / 70, -1, 1) - gazeTarget.x) * 0.12;
+      gazeTarget.y += (clamp(dy / 52, -1, 1) - gazeTarget.y) * 0.12;
+      const targetYaw = clamp(dx / (visualCanvas.width * 0.42), -1, 1) * 1.05;
+      const targetPitch = clamp(-dy / (visualCanvas.height * 0.42), -1, 1) * 0.72;
+      sphereYaw += (targetYaw - sphereYaw) * 0.1;
+      spherePitch += (targetPitch - spherePitch) * 0.1;
+    } else if (visualTime >= nextGazeShift) {
+      const angle = visualTime * 1.7;
+      gazeTarget.x = Math.sin(angle) * 0.55;
+      gazeTarget.y = Math.cos(angle * 0.73) * 0.28;
+      nextGazeShift = visualTime + 1.8 + (Math.sin(angle * 0.41) + 1) * 1.4;
+    }
+
+    if (!hasPointer) {
+      gazeTarget.x += (Math.sin(visualTime * 0.8) * 0.12 - gazeTarget.x) * 0.04;
+      gazeTarget.y += (Math.cos(visualTime * 0.63) * 0.08 - gazeTarget.y) * 0.04;
+      sphereYaw += (0 - sphereYaw) * 0.06;
+      spherePitch += (0 - spherePitch) * 0.06;
+    }
 
     // Random smooth blinking logic
     if (!blinkState.isBlinking) {
@@ -2496,13 +2575,14 @@ prevSrc.onended = () => {
   // - F2 controls tongue size.
   // - F3 controls mouth width.
   // When F1 and F3 produce matching normalized values, the mouth is a circle.
-  function drawVisual(f1, f2, f3, phone, phonemeKey) {
+  function drawVisual(f1, f2, f3, phone, phonemeKey, timeSeconds = null) {
     // Update floating offset, independent rotations & eye blink state
-    updateFaceState();
+    updateFaceState(timeSeconds);
 
     const c = visualCtx;
     const W = visualCanvas.width, H = visualCanvas.height;
-    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#ffffff";
+    c.fillRect(0, 0, W, H);
 
     // --- Positional Floating (Linear bobbing) ---
     const floatY = Math.sin(floatTime) * 8;
@@ -2510,6 +2590,46 @@ prevSrc.onended = () => {
 
     const cx = W / 2 + floatX;
     const cy = H / 2 + floatY;
+    const sphereRadius = Math.min(W * 0.43, H * 0.48);
+    const surfaceYaw = sphereYaw;
+    const surfacePitch = spherePitch;
+    const pivotOffsetX = Math.sin(surfaceYaw) * sphereRadius * 0.28;
+    const pivotOffsetY = -Math.sin(surfacePitch) * sphereRadius * 0.22;
+
+    // Map facial points over a rotated invisible sphere and recenter the patch.
+    const projectSpherePoint = (x, y) => {
+      const nx = clamp(x / sphereRadius, -0.96, 0.96);
+      const ny = clamp(y / sphereRadius, -0.96, 0.96);
+      const nz = Math.sqrt(Math.max(0.04, 1 - nx * nx - ny * ny));
+      const cosYaw = Math.cos(surfaceYaw), sinYaw = Math.sin(surfaceYaw);
+      const cosPitch = Math.cos(surfacePitch), sinPitch = Math.sin(surfacePitch);
+      const rotatedX = nx * cosYaw + nz * sinYaw;
+      const rotatedZ = -nx * sinYaw + nz * cosYaw;
+      const rotatedY = ny * cosPitch - rotatedZ * sinPitch;
+      return [
+        cx + pivotOffsetX + (rotatedX - sinYaw) * sphereRadius,
+        cy + pivotOffsetY + (rotatedY + cosYaw * sinPitch) * sphereRadius
+      ];
+    };
+    const sphereEllipsePath = (x, y, radiusX, radiusY, rotation = 0) => {
+      c.beginPath();
+      for (let i = 0; i <= 32; i++) {
+        const angle = i / 32 * Math.PI * 2;
+        const localX = x + Math.cos(angle) * radiusX * Math.cos(rotation) - Math.sin(angle) * radiusY * Math.sin(rotation);
+        const localY = y + Math.cos(angle) * radiusX * Math.sin(rotation) + Math.sin(angle) * radiusY * Math.cos(rotation);
+        const [screenX, screenY] = projectSpherePoint(localX, localY);
+        if (i === 0) c.moveTo(screenX, screenY); else c.lineTo(screenX, screenY);
+      }
+      c.closePath();
+    };
+    const sphereQuadPath = (x, y, width, height) => {
+      c.beginPath();
+      [[x - width / 2, y], [x + width / 2, y], [x + width / 2, y + height], [x - width / 2, y + height]].forEach(([localX, localY], index) => {
+        const [screenX, screenY] = projectSpherePoint(localX, localY);
+        if (index === 0) c.moveTo(screenX, screenY); else c.lineTo(screenX, screenY);
+      });
+      c.closePath();
+    };
 
     // --- Rotational Float Angles (Slower & Subtle) ---
     const mouthRotAngle = Math.sin(mouthRotTime) * 0.04; // ~ ±2.3°
@@ -2560,44 +2680,32 @@ prevSrc.onended = () => {
     // 1. EYES
     // ==========================================
     const eyeOffsetX = 24 * mouthScale;
-    const eyeCenterY = cy - 32;
     const eyeRadius = 4;
 
     const blinkFactor = blinkState.isBlinking ? Math.sin(blinkState.progress) : 0;
     const currentEyeScaleY = 1 - blinkFactor;
 
-    c.save();
-    c.translate(cx, eyeCenterY);
-    c.rotate(eyesRotAngle);
-
+    const eyeLookX = gazeTarget.x * 2.2;
+    const eyeLookY = gazeTarget.y * 1.6;
     c.fillStyle = "#000";
 
     // Left Eye
-    c.beginPath();
-    c.ellipse(-eyeOffsetX, 0, eyeRadius, Math.max(0.5, eyeRadius * currentEyeScaleY), 0, 0, Math.PI * 2);
+    sphereEllipsePath(-eyeOffsetX + eyeLookX, -32 + eyeLookY, eyeRadius, Math.max(0.4, eyeRadius * currentEyeScaleY), eyesRotAngle);
     c.fill();
 
     // Right Eye
-    c.beginPath();
-    c.ellipse(eyeOffsetX, 0, eyeRadius, Math.max(0.5, eyeRadius * currentEyeScaleY), 0, 0, Math.PI * 2);
+    sphereEllipsePath(eyeOffsetX + eyeLookX, -32 + eyeLookY, eyeRadius, Math.max(0.4, eyeRadius * currentEyeScaleY), eyesRotAngle);
     c.fill();
-
-    c.restore();
 
     // ==========================================
     // 2. MOUTH (With independent floating rotation)
     // ==========================================
-    c.save();
-    c.translate(cx, cy);
-    c.rotate(mouthRotAngle);
-
     // Consider mouth open only if height is clearly visible
     const isOpenEnough = mouthH > 5 * mouthScale;
 
     if (isOpenEnough) {
       const mouthPath = () => {
-        c.beginPath();
-        c.ellipse(0, 0, mouthRx, mouthRy, 0, 0, Math.PI * 2);
+        sphereEllipsePath(0, 0, mouthRx, mouthRy, mouthRotAngle);
       };
 
       // Cavity (black background)
@@ -2621,8 +2729,7 @@ prevSrc.onended = () => {
           tongueR *= 2
         }
 
-        c.beginPath();
-        c.ellipse(0, tongueY, tongueR, tongueRY, 0, 0, Math.PI * 2);
+        sphereEllipsePath(0, tongueY, tongueR, tongueRY, mouthRotAngle);
         c.fillStyle = "#e03a3a";
         c.fill();
       }
@@ -2637,9 +2744,11 @@ prevSrc.onended = () => {
       }
       c.fillStyle = "#ffffff";
       // Top teeth
-      c.fillRect(-toothW / 2, -mouthRy, toothW, toothH);
+      sphereQuadPath(0, -mouthRy, toothW, toothH);
+      c.fill();
       // Bottom teeth
-      c.fillRect(-toothW / 2, mouthRy - toothH, toothW, toothH);
+      sphereQuadPath(0, mouthRy - toothH, toothW, toothH);
+      c.fill();
 
       c.restore(); // Restore clip mask
 
@@ -2651,16 +2760,16 @@ prevSrc.onended = () => {
 
     } else {
       // Smooth Closed State: draw a clean rounded horizontal line for lips
+      const [leftLipX, leftLipY] = projectSpherePoint(-mouthRx, 0);
+      const [rightLipX, rightLipY] = projectSpherePoint(mouthRx, 0);
       c.beginPath();
-      c.moveTo(-mouthRx, 0);
-      c.lineTo(mouthRx, 0);
+      c.moveTo(leftLipX, leftLipY);
+      c.lineTo(rightLipX, rightLipY);
       c.strokeStyle = "#000";
       c.lineWidth = 3.5;
       c.lineCap = "round";
       c.stroke();
     }
-
-    c.restore(); // Restore mouth transform
 
     // UI labels updates
     visualFormantsEl.innerHTML = `F1: ${Math.round(f1)}&nbsp;&nbsp;F2: ${Math.round(f2)}&nbsp;&nbsp;F3: ${Math.round(f3)}`;
@@ -2684,14 +2793,17 @@ prevSrc.onended = () => {
     drawVisual(0, 0, 0, null, "rest");
   }
 
+  visualCanvas.addEventListener("pointermove", event => {
+    const rect = visualCanvas.getBoundingClientRect();
+    pointerPosition = {
+      x: (event.clientX - rect.left) * visualCanvas.width / rect.width,
+      y: (event.clientY - rect.top) * visualCanvas.height / rect.height
+    };
+  });
+  visualCanvas.addEventListener("pointerleave", () => { pointerPosition = null; });
+
   // Animation tick: find the currently-playing phoneme and update the mouth.
-  function animTick() {
-    if (!actx) {
-      setVisualIdle();
-      visualAnimId = requestAnimationFrame(animTick);
-      return;
-    }
-    const elapsed = actx.currentTime - visualStartTime;
+  function renderVisualFrame(elapsed) {
     let t = 0;
     let cur = null;
     let curStart = 0;
@@ -2738,35 +2850,39 @@ prevSrc.onended = () => {
         }
       }
 
-      drawVisual(f[0], f[1], f[2], cur.key, cur.key);
+      drawVisual(f[0], f[1], f[2], cur.key, cur.key, elapsed);
     } else {
-      drawVisual(0, 0, 0, cur ? cur.key : "rest", cur ? cur.key : "rest");
+      drawVisual(0, 0, 0, cur ? cur.key : "rest", cur ? cur.key : "rest", elapsed);
     }
+  }
+
+  function animTick() {
+    if (!actx) {
+      setVisualIdle();
+      visualAnimId = null;
+      return;
+    }
+    renderVisualFrame(actx.currentTime - visualStartTime);
 
     visualAnimId = requestAnimationFrame(animTick);
   }
 
-  async function exportAnimationMp4(button) {
-    if (!lastRenderedAudio || !lastRenderedPhonemes) {
-      statusEl.textContent = "Synthesize audio before exporting.";
+  async function exportAnimationMp4Fallback(button) {
+    if (typeof MediaRecorder === "undefined") {
+      statusEl.textContent = "This browser supports neither WebCodecs nor MediaRecorder.";
       return;
     }
-    if (!visualCanvas.captureStream || typeof MediaRecorder === "undefined") {
-      statusEl.textContent = "Animation export is not supported in this browser.";
-      return;
-    }
-
     const mp4Type = [
       "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
       "video/mp4"
     ].find(type => MediaRecorder.isTypeSupported(type));
-    if (!mp4Type) {
-      statusEl.textContent = "This browser cannot encode MP4. Try Chrome or Edge for MP4 export.";
+    if (!mp4Type || !visualCanvas.captureStream) {
+      statusEl.textContent = "This browser supports neither WebCodecs nor MP4 recording.";
       return;
     }
 
     button.disabled = true;
-    statusEl.textContent = "Recording animation...";
+    statusEl.textContent = "Recording MP4 fallback...";
     stopPreview();
 
     const exportCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -2791,6 +2907,7 @@ prevSrc.onended = () => {
     const duration = audioBuffer.duration;
 
     const cleanup = () => {
+      stopVisualAnim();
       setVisualIdle();
       for (const track of stream.getTracks()) track.stop();
       try { source.stop(); } catch (e) {}
@@ -2804,7 +2921,7 @@ prevSrc.onended = () => {
     recorder.onerror = event => {
       cleanup();
       button.disabled = false;
-      statusEl.textContent = "Animation export failed: " + (event.error?.message || "unknown error");
+      statusEl.textContent = "MP4 export failed: " + (event.error?.message || "unknown error");
     };
     recorder.onstop = () => {
       cleanup();
@@ -2821,17 +2938,98 @@ prevSrc.onended = () => {
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     };
 
-    // Reuse the live visual timing code while the rendered audio plays.
     visualSeq = lastRenderedPhonemes;
     actx = exportCtx;
     visualStartTime = exportCtx.currentTime;
     startVisualAnim();
     recorder.start(100);
-    source.connect(exportCtx.destination);
     source.start();
     setTimeout(() => {
       if (recorder.state === "recording") recorder.stop();
     }, Math.ceil(duration * 1000) + 250);
+  }
+
+  async function exportAnimationMp4(button) {
+    if (!lastRenderedAudio || !lastRenderedPhonemes) {
+      statusEl.textContent = "Synthesize audio before exporting.";
+      return;
+    }
+    if (typeof VideoEncoder === "undefined" || typeof AudioEncoder === "undefined" || typeof VideoFrame === "undefined") {
+      await exportAnimationMp4Fallback(button);
+      return;
+    }
+
+    button.disabled = true;
+    statusEl.textContent = "Rendering animation frames...";
+    stopPreview();
+
+    const duration = lastRenderedAudio.length / sampleRate;
+    try {
+      const { Muxer, ArrayBufferTarget } = await import("https://esm.sh/webm-muxer@5.0.1");
+      const fps = 30;
+      const target = new ArrayBufferTarget();
+      const muxer = new Muxer({
+        target,
+        video: { codec: "V_VP9", width: visualCanvas.width, height: visualCanvas.height, frameRate: fps },
+        audio: { codec: "A_OPUS", sampleRate: 48000, numberOfChannels: 1 }
+      });
+      const videoEncoder = new VideoEncoder({
+        output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+        error: error => { throw error; }
+      });
+      videoEncoder.configure({ codec: "vp09.00.10.08", width: visualCanvas.width, height: visualCanvas.height, bitrate: 2_500_000, framerate: fps });
+      visualSeq = lastRenderedPhonemes;
+      const frameCount = Math.ceil(duration * fps);
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex++) {
+        const timestamp = frameIndex / fps;
+        renderVisualFrame(timestamp);
+        const frame = new VideoFrame(visualCanvas, { timestamp: Math.round(timestamp * 1_000_000), duration: Math.round(1_000_000 / fps) });
+        videoEncoder.encode(frame, { keyFrame: frameIndex % (fps * 2) === 0 });
+        frame.close();
+      }
+      await videoEncoder.flush();
+      videoEncoder.close();
+
+      const outputRate = 48000;
+      const outputSamples = Math.ceil(lastRenderedAudio.length * outputRate / sampleRate);
+      const resampled = new Float32Array(outputSamples);
+      for (let i = 0; i < outputSamples; i++) {
+        const sourcePosition = i * sampleRate / outputRate;
+        const lower = Math.floor(sourcePosition);
+        const fraction = sourcePosition - lower;
+        const next = Math.min(lower + 1, lastRenderedAudio.length - 1);
+        resampled[i] = lastRenderedAudio[lower] * (1 - fraction) + lastRenderedAudio[next] * fraction;
+      }
+      const audioEncoder = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: error => { throw error; } });
+      audioEncoder.configure({ codec: "opus", sampleRate: outputRate, numberOfChannels: 1, bitrate: 128000 });
+      const audioFrameSize = 960;
+      for (let offset = 0; offset < resampled.length; offset += audioFrameSize) {
+        const frameData = resampled.slice(offset, Math.min(offset + audioFrameSize, resampled.length));
+        const audioFrame = new AudioData({ format: "f32", sampleRate: outputRate, numberOfFrames: frameData.length, numberOfChannels: 1, timestamp: Math.round(offset * 1_000_000 / outputRate), data: frameData });
+        audioEncoder.encode(audioFrame);
+        audioFrame.close();
+      }
+      await audioEncoder.flush();
+      audioEncoder.close();
+      muxer.finalize();
+
+      const blob = new Blob([target.buffer], { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `singer-animation-${Date.now()}.webm`;
+      link.textContent = "Download WebM Animation";
+      link.style = "display:inline-block;margin:8px 8px 0 0;";
+      outputControls.appendChild(link);
+      statusEl.textContent = "Animation exported.";
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (error) {
+      console.error(error);
+      statusEl.textContent = "Animation export failed: " + (error.message || error);
+    } finally {
+      setVisualIdle();
+      button.disabled = false;
+    }
   }
 
   // ======== PIANO ROLL IMPLEMENTATION ========
@@ -2840,11 +3038,12 @@ prevSrc.onended = () => {
   const ctx = pianoRollCanvas.getContext("2d");
   const pianoRollRefreshBtn = container.querySelector("#pianoRollRefreshBtn");
   const pianoRollSnap = container.querySelector("#pianoRollSnap");
+  const pianoRollSnapType = container.querySelector("#pianoRollSnapType");
 
   // Piano roll constants
   const KEYBOARD_WIDTH = 50;
   const NOTE_HEIGHT = 14;
-  const PIXELS_PER_BEAT = 120;
+  let PIXELS_PER_BEAT = 120;
   const MIN_NOTE_DURATION_PX = 8;
   const NOTE_RADIUS = 4;
 
@@ -2862,6 +3061,54 @@ prevSrc.onended = () => {
   let skipReparse = false;   // while dragging, don't re-parse from text (preserves absolute positions)
   let consonantWrapperEnabled = true; // default ON
   const pianoRollPanelEl = container.querySelector("#pianoRollPanel");
+  const BRACKET_SETTING_DEFAULTS = { fs: "", vf: "", vd: "", vde: "", vfa: "", vfao: "", slide: "", fmorph: "", portamento: "" };
+  let pianoRollHistory = [];
+  let pianoRollRedo = [];
+  let lastPianoRollSnapshot = null;
+  let suppressPianoRollHistory = false;
+
+  const clonePianoRollNotes = () => JSON.parse(JSON.stringify(pianoRollNotes));
+  const pianoRollSnapshot = () => JSON.stringify(pianoRollNotes.map(note => {
+    const copy = { ...note };
+    delete copy.startPx;
+    delete copy.durPx;
+    return copy;
+  }));
+  const rememberPianoRollChange = () => {
+    const snapshot = pianoRollSnapshot();
+    if (!suppressPianoRollHistory && lastPianoRollSnapshot && snapshot !== lastPianoRollSnapshot) {
+      pianoRollHistory.push(lastPianoRollSnapshot);
+      pianoRollRedo = [];
+    }
+    lastPianoRollSnapshot = snapshot;
+  };
+  const restorePianoRollSnapshot = (snapshot) => {
+    pianoRollNotes = JSON.parse(snapshot);
+    selectedNoteIndexes.clear();
+    selectedNoteIndex = -1;
+    suppressPianoRollHistory = true;
+    updateTextFromPianoRoll();
+    suppressPianoRollHistory = false;
+    drawPianoRoll();
+    updatePianoRollPanel();
+  };
+  const deleteSelectedPianoRollNotes = () => {
+    if (selectedNoteIndexes.size === 0) return false;
+    const idxs = [...selectedNoteIndexes].sort((a, b) => b - a);
+    for (const idx of idxs) {
+      if (idx >= 0 && idx < pianoRollNotes.length) pianoRollNotes.splice(idx, 1);
+    }
+    selectedNoteIndexes.clear();
+    selectedNoteIndex = -1;
+    updateTextFromPianoRoll();
+    drawPianoRoll();
+    updatePianoRollPanel();
+    return true;
+  };
+  const closeVisualBtn = container.querySelector("#closeVisualBtn");
+  const closeExperimentalBtn = container.querySelector("#closeExperimentalBtn");
+  closeVisualBtn.addEventListener("click", () => container.querySelector("#visualFrame").style.display = "none");
+  closeExperimentalBtn.addEventListener("click", () => container.querySelector("#experimentalPanel").style.display = "none");
 
   // Style rules for the left piano-roll panel (note editor controls).
   const prStyle = document.createElement("style");
@@ -2871,6 +3118,11 @@ prevSrc.onended = () => {
     #pianoRollPanel .pe-btn{display:inline-block;margin:8px 4px 0 0;padding:4px 8px;font-size:11px;}
     #pianoRollPanel .pe-total{font-size:11px;color:#777;margin-top:6px;}
     #pianoRollPanel .pe-hint{font-size:11px;color:#777;margin-top:6px;}
+    #pianoRollPanel .phone-bank{position:relative;min-height:90px;max-height:310px;resize:both;overflow:hidden;margin-top:8px;padding:0;border:1px solid #aaa;background:#fafafa;}
+    #pianoRollPanel .phone-bank-header{display:flex;align-items:center;gap:5px;padding:5px 6px;background:#f2f2f2;border-bottom:1px solid #ccc;cursor:grab;user-select:none;touch-action:none;}
+    #pianoRollPanel .phone-bank-body{height:calc(100% - 29px);overflow:auto;padding:6px;}
+    #pianoRollPanel .phone-bank-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;}
+    #pianoRollPanel .phone-bank-buttons button{min-width:0;padding:3px 1px;font:11px monospace;}
   `;
   document.head.appendChild(prStyle);
 
@@ -2883,14 +3135,27 @@ prevSrc.onended = () => {
   // Parse the text input and build piano roll notes
   function parsePianoRollFromText(text, bpm, gridType, stepsPerBeat) {
     const beatLen = 60 / bpm;
-    const regex = /([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
+    const regex = /(\[[^\]]*\])?\s*([a-zA-Z']+)\s*<\s*([^>]+)\s*>/gi;
     const notes = [];
     let currentPitchName = "C4";
+    let currentSettings = { ...BRACKET_SETTING_DEFAULTS };
     let match;
     let startBeat = 0;
     while ((match = regex.exec(text)) !== null) {
-      const phoneme = match[1].toLowerCase();
-      const fields = match[2].split(",").map(field => field.trim());
+      const bracketText = match[1] || "";
+      const phoneme = match[2].toLowerCase();
+      const fields = match[3].split(",").map(field => field.trim());
+      if (/\breset\b/i.test(bracketText)) currentSettings = { ...BRACKET_SETTING_DEFAULTS };
+      const settingMatches = /\b(fs|vf|vd|vde|vdae|vfa|vfao|sl|slide|fm|fmorph|port|portamento|pt)\s*(?::|=)?\s*(auto|-?(?:\d+(?:\.\d*)?|\.\d+))/gi;
+      let settingMatch;
+      while ((settingMatch = settingMatches.exec(bracketText)) !== null) {
+        let settingName = settingMatch[1].toLowerCase();
+        if (settingName === "vdae") settingName = "vde";
+        if (settingName === "sl") settingName = "slide";
+        if (settingName === "fm") settingName = "fmorph";
+        if (settingName === "port" || settingName === "pt") settingName = "portamento";
+        currentSettings[settingName] = settingMatch[2];
+      }
       const hasExplicitPitch = fields.length > 1;
       if (hasExplicitPitch) currentPitchName = fields[0];
       const pitchRaw = currentPitchName;
@@ -2912,7 +3177,8 @@ prevSrc.onended = () => {
           pitchName: pitchRaw,
           midiNote,
           startBeat,
-          durBeats
+          durBeats,
+          bracketSettings: { ...currentSettings }
         });
       }
       startBeat += durBeats;
@@ -2967,6 +3233,11 @@ prevSrc.onended = () => {
     return Math.round(val / gridSize) * gridSize;
   }
 
+  function getPianoRollSnapResolution() {
+    const resolution = parseFloat(pianoRollSnapType.value);
+    return Number.isFinite(resolution) && resolution > 0 ? resolution : 0.25;
+  }
+
 // Build display notes for consonant wrapping.
   // When the wrapper is enabled, a consonant note immediately preceding a
   // vowel note (adjacent in time, same pitch) is merged into a single visual
@@ -3014,6 +3285,7 @@ prevSrc.onended = () => {
     // sequential positions and push notes forward). Use the in-memory notes.
     if (!skipReparse) {
       pianoRollNotes = parsePianoRollFromText(text, bpm, gridType, stepsPerBeat);
+      lastPianoRollSnapshot = pianoRollSnapshot();
     }
     const displayNotes = buildDisplayNotes();
     const range = getMidiRange(pianoRollNotes);
@@ -3058,7 +3330,7 @@ prevSrc.onended = () => {
     }
 
     // Draw grid lines
-    const snapResolution = gridType === "steps" ? 1.0 / stepsPerBeat : 1.0;
+    const snapResolution = getPianoRollSnapResolution();
     const gridPx = snapResolution * PIXELS_PER_BEAT;
 
     for (let beat = 0; beat <= totalBeats; beat += snapResolution) {
@@ -3210,49 +3482,46 @@ prevSrc.onended = () => {
 
   function attachPhonemeBank() {
     if (!pianoRollPanelEl || pianoRollPanelEl.querySelector("#prOpenPhoneBank")) return;
-
     const openButton = document.createElement("button");
     openButton.id = "prOpenPhoneBank";
     openButton.className = "pe-btn";
     openButton.type = "button";
-    openButton.textContent = "Open Phone Bank";
-    openButton.style.display = "block";
-
+    openButton.textContent = "Phoneme Bank";
     const frame = document.createElement("div");
     frame.id = "prPhoneBankFrame";
-    frame.style.cssText = "display:none;margin-top:8px;padding:6px;border:1px solid #aaa;background:#fafafa;";
-    frame.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;font-weight:bold;">
-      <span>Phone Bank</span><button type="button" id="prClosePhoneBank" class="pe-btn" style="margin:0;padding:2px 6px;">Close</button>
-    </div><div id="prPhoneBankButtons" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;"></div>`;
-
+    frame.className = "phone-bank";
+    frame.style.display = "none";
+    frame.innerHTML = `<div class="phone-bank-header"><b style="flex:1">Phoneme Bank</b><button type="button" id="prClosePhoneBank">x</button></div><div class="phone-bank-body"><div class="phone-bank-buttons" id="prPhoneBankButtons"></div></div>`;
     const buttons = frame.querySelector("#prPhoneBankButtons");
-
-    container.innerHTML = `
-      <h3 style="margin:0 0 8px">Hoster's FR Synthesizer</h3>
-      <div style="font-size:12px;margin-bottom:8px">
-        Javascript Synth that sings for u or smth and is (probably) very buggy and makes artifacts
-      </div>
-      <div style="font-size:12px;margin-bottom:8px">
-        This started off as a simple short script by chatgpt that turned into a full project (maintained by vsc blackbox)
-      </div>
-      <div style="font-size:12px;margin-bottom:16px">
-        this is ai-written but give me some credit, at least i did SOME of the work...
-      </div>
-
-      <div id="visualFrame" style="position:fixed;top:10px;right:10px;width:240px;height:240px;border:2px solid #333;background:#fff;border-radius:6px;box-sizing:border-box;padding:6px;font-family:monospace;z-index:10;">
-        <div style="font-weight:bold;text-align:center;font-size:13px;border-bottom:1px solid #ccc;padding-bottom:2px;">Visual</div>
-        <canvas id="visualCanvas" width="210" height="140" style="display:block;margin:4px auto;"></canvas>
-        <div id="visualFormants" style="text-align:center;font-size:11px;margin-top:4px;">F1: 0&nbsp;&nbsp;F2: 0&nbsp;&nbsp;F3: 0</div>
-        <div id="visualPhone" style="text-align:center;font-size:11px;margin-top:3px;">Current Phone: None</div>
-      </div>
-    `;
-    
     for (const key of Object.keys(phonemeMap)) {
+      if (key === "rest") continue;
       const button = document.createElement("button");
       button.type = "button";
-      container.style = "margin:0 auto;padding:12px;background:#fff;border:1px solid #ccc;font-family:monospace;max-width:900px;box-sizing:border-box;";
+      button.textContent = key;
       button.title = `Preview ${key}`;
+      button.addEventListener("click", () => previewPhoneme(key));
+      buttons.appendChild(button);
+    }
+    openButton.addEventListener("click", () => { frame.style.display = frame.style.display === "none" ? "block" : "none"; });
+    frame.querySelector("#prClosePhoneBank").addEventListener("click", () => { frame.style.display = "none"; });
+    const header = frame.querySelector(".phone-bank-header");
+    let drag = null;
+    header.addEventListener("pointerdown", event => {
+      const rect = frame.getBoundingClientRect();
+      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      header.setPointerCapture(event.pointerId);
+    });
+    header.addEventListener("pointermove", event => {
+      if (!drag) return;
+      frame.style.transform = `translate(${event.clientX - drag.x}px, ${event.clientY - drag.y}px)`;
+    });
+    header.addEventListener("pointerup", () => { drag = null; });
+    header.addEventListener("pointercancel", () => { drag = null; });
+    pianoRollPanelEl.append(openButton, frame);
+  }
 
+  function updateLegacySelectedPanel() {
+    /*
       let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Piano Roll Settings</div>`;
       h += `<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;">
               <input type="checkbox" id="prConsonantWrap" ${consonantWrapperEnabled ? "checked" : ""}/>
@@ -3479,6 +3748,8 @@ prevSrc.onended = () => {
     });
   }
 
+    */
+  }
   const gridType = container.querySelector("#gridType").value || "beats";
   const stepsPerBeat = Math.max(
     1,
@@ -3486,43 +3757,56 @@ prevSrc.onended = () => {
   );
 
   function updatePianoRollPanel() {
-  if (!pianoRollPanelEl) return;
+    if (!pianoRollPanelEl) return;
+    const gridType = container.querySelector("#gridType").value || "beats";
+    const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value, 10) || 4);
+    let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Piano Roll Settings</div>`;
+    h += `<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;"><input type="checkbox" id="prConsonantWrap" ${consonantWrapperEnabled ? "checked" : ""}/> Consonant wrapping</label>`;
+    h += `<label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;"><input type="checkbox" id="prSnap" ${pianoRollSnap.checked ? "checked" : ""}/> Snap to grid</label>`;
+    h += `<button id="prAdd" class="pe-btn">Add note</button>`;
+    h += `<button id="prRefreshBtn" class="pe-btn">Refresh from text</button>`;
 
-  const gridType = container.querySelector("#gridType").value || "beats";
-  const stepsPerBeat = Math.max(
-    1,
-    parseInt(container.querySelector("#stepsPerBeat").value, 10) || 4
-  );
-
-  let h = `<div style="font-weight:bold;border-bottom:1px solid #ccc;padding-bottom:2px;">Piano Roll Settings</div>`;
-  h += `<label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;">
-    <input type="checkbox" id="prConsonantWrap" ${consonantWrapperEnabled ? "checked" : ""}/>
-    Consonant wrapping
-  </label>`;
-  h += `<label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;">
-    <input type="checkbox" id="prSnap" ${pianoRollSnap.checked ? "checked" : ""}/>
-    Snap to grid
-  </label>`;
-  h += `<button id="prRefreshBtn" class="pe-btn">Refresh from text</button>`;
-  h += `<div class="pe-hint">Grid: ${gridType}, ${stepsPerBeat} steps per beat</div>`;
-
-  pianoRollPanelEl.innerHTML = h;
-
-  pianoRollPanelEl.querySelector("#prConsonantWrap").addEventListener("change", (event) => {
-    consonantWrapperEnabled = event.target.checked;
-    drawPianoRoll();
-  });
-
-  pianoRollPanelEl.querySelector("#prSnap").addEventListener("change", (event) => {
-    pianoRollSnap.checked = event.target.checked;
-    drawPianoRoll();
-  });
-
-  pianoRollPanelEl.querySelector("#prRefreshBtn").addEventListener("click", () => {
-    selectedNoteIndex = -1;
-    selectedNoteIndexes.clear();
-    drawPianoRoll();
-  });
+    const selected = selectedNoteIndexes.size === 1 ? pianoRollNotes[[...selectedNoteIndexes][0]] : null;
+    if (selected) {
+      selected.bracketSettings = { ...BRACKET_SETTING_DEFAULTS, ...(selected.bracketSettings || {}) };
+      h += `<div class="pe-label">Phoneme<br/><input class="pe-input" id="prPhoneme" value="${escapeHtml(selected.phoneme)}"/></div>`;
+      h += `<details style="margin-top:8px"><summary>Bracket settings []</summary>`;
+      for (const key of Object.keys(BRACKET_SETTING_DEFAULTS)) {
+        const defaultValue = key === "fs" ? "1" : "";
+        h += `<label class="pe-label">${key}<br/><input class="pe-input pr-setting" data-setting="${key}" value="${escapeHtml(selected.bracketSettings[key] || defaultValue)}" placeholder="default"/></label>`;
+      }
+      h += `</details>`;
+      h += `<button id="prDelete" class="pe-btn">Delete</button><button id="prDeselect" class="pe-btn">Deselect</button>`;
+    } else if (selectedNoteIndexes.size > 1) {
+      h += `<div class="pe-total">${selectedNoteIndexes.size} notes selected</div><button id="prDelete" class="pe-btn">Delete</button>`;
+    }
+    h += `<div class="pe-hint">Grid: ${gridType}, ${stepsPerBeat} steps per beat</div>`;
+    pianoRollPanelEl.innerHTML = h;
+    attachPhonemeBank();
+    const wrap = pianoRollPanelEl.querySelector("#prConsonantWrap");
+    wrap.addEventListener("change", event => { consonantWrapperEnabled = event.target.checked; drawPianoRoll(); updatePianoRollPanel(); });
+    pianoRollPanelEl.querySelector("#prSnap").addEventListener("change", event => { pianoRollSnap.checked = event.target.checked; drawPianoRoll(); });
+    pianoRollPanelEl.querySelector("#prAdd").addEventListener("click", () => {
+      const startBeat = pianoRollNotes.reduce((end, note) => Math.max(end, note.startBeat + note.durBeats), 0);
+      pianoRollNotes.push({ phoneme: "a", pitchName: "C4", midiNote: pitchNameToMidi("C4"), startBeat, durBeats: 1, bracketSettings: { ...BRACKET_SETTING_DEFAULTS } });
+      pianoRollNotes.sort((a, b) => a.startBeat - b.startBeat || a.midiNote - b.midiNote);
+      selectedNoteIndex = pianoRollNotes.length - 1;
+      selectedNoteIndexes = new Set([selectedNoteIndex]);
+      updateTextFromPianoRoll(); drawPianoRoll(); updatePianoRollPanel();
+    });
+    pianoRollPanelEl.querySelector("#prRefreshBtn").addEventListener("click", () => { selectedNoteIndex = -1; selectedNoteIndexes.clear(); drawPianoRoll(); updatePianoRollPanel(); });
+    const phonemeInputEl = pianoRollPanelEl.querySelector("#prPhoneme");
+    if (phonemeInputEl) phonemeInputEl.addEventListener("change", () => { selected.phoneme = phonemeInputEl.value.trim().toLowerCase() || selected.phoneme; updateTextFromPianoRoll(); drawPianoRoll(); updatePianoRollPanel(); });
+    for (const input of pianoRollPanelEl.querySelectorAll(".pr-setting")) {
+      input.addEventListener("input", () => {
+        selected.bracketSettings[input.dataset.setting] = input.value.trim();
+        updateTextFromPianoRoll();
+      });
+    }
+    const deleteButton = pianoRollPanelEl.querySelector("#prDelete");
+    if (deleteButton) deleteButton.addEventListener("click", deleteSelectedPianoRollNotes);
+    const deselectButton = pianoRollPanelEl.querySelector("#prDeselect");
+    if (deselectButton) deselectButton.addEventListener("click", () => { selectedNoteIndexes.clear(); selectedNoteIndex = -1; drawPianoRoll(); updatePianoRollPanel(); });
 }
 
   // Update text input from piano roll notes
@@ -3547,12 +3831,15 @@ prevSrc.onended = () => {
       let units = note.durBeats;
       if (gridType === "steps") units = note.durBeats * stepsPerBeat;
       const pitchPart = note.pitchName === previousPitchName ? "" : `${note.pitchName},`;
-      tokens.push(`${note.phoneme} <${pitchPart}${units.toFixed(3)}>`);
+      const settings = note.bracketSettings || {};
+      const bracket = Object.entries(settings).filter(([, value]) => value !== "" && value != null).map(([key, value]) => `${key}:${value}`).join(", ");
+      tokens.push(`${bracket ? `[${bracket}] ` : ""}${note.phoneme} <${pitchPart}${units.toFixed(3)}>`);
       previousPitchName = note.pitchName;
       prevEndBeat = note.startBeat + note.durBeats;
     }
 
     container.querySelector("#phonemeInput").value = tokens.join(" ");
+    rememberPianoRollChange();
   }
 
   // Hit test: find note at canvas coordinates
@@ -3589,7 +3876,7 @@ prevSrc.onended = () => {
     let beat = x / PIXELS_PER_BEAT;
     const gridType = container.querySelector("#gridType").value || "beats";
     const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
-    const snapResolution = gridType === "steps" ? 1.0 / stepsPerBeat : 0.25;
+    const snapResolution = getPianoRollSnapResolution();
 
     if (pianoRollSnap.checked) {
       beat = snapToGrid(beat, snapResolution);
@@ -3605,6 +3892,20 @@ prevSrc.onended = () => {
 
 // Mouse events
   pianoRollCanvas.addEventListener("mousedown", (e) => {
+    pianoRollCanvas.focus();
+    if (e.button === 2) {
+      const rect = pianoRollCanvas.getBoundingClientRect();
+      const scaleX = pianoRollCanvas.width / rect.width;
+      const scaleY = pianoRollCanvas.height / rect.height;
+      const hit = hitTestNotes((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY);
+      if (hit) {
+        selectedNoteIndexes = new Set([hit.noteIdx]);
+        selectedNoteIndex = hit.noteIdx;
+        deleteSelectedPianoRollNotes();
+      }
+      e.preventDefault();
+      return;
+    }
     const rect = pianoRollCanvas.getBoundingClientRect();
     const scaleX = pianoRollCanvas.width / rect.width;
     const scaleY = pianoRollCanvas.height / rect.height;
@@ -3643,10 +3944,12 @@ prevSrc.onended = () => {
         origStartBeat: note.startBeat,
         origDurBeats: note.durBeats,
         origMidi: note.midiNote,
-        origPitches
+        origPitches,
+        selectedNotes: [...selectedNoteIndexes].map(index => pianoRollNotes[index]).filter(Boolean)
       };
       skipReparse = true; // preserve absolute positions while dragging
       drawPianoRoll();
+      updatePianoRollPanel();
       return;
     }
 
@@ -3676,10 +3979,23 @@ prevSrc.onended = () => {
       selectedNoteIndexes = new Set([selectedNoteIndex]);
       updateTextFromPianoRoll();
       drawPianoRoll();
+      updatePianoRollPanel();
     }
   });
 
   pianoRollCanvas.addEventListener("mousemove", (e) => {
+    if (e.buttons & 2) {
+      const rect = pianoRollCanvas.getBoundingClientRect();
+      const scaleX = pianoRollCanvas.width / rect.width;
+      const scaleY = pianoRollCanvas.height / rect.height;
+      const hit = hitTestNotes((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY);
+      if (hit) {
+        selectedNoteIndexes = new Set([hit.noteIdx]);
+        selectedNoteIndex = hit.noteIdx;
+        deleteSelectedPianoRollNotes();
+      }
+      return;
+    }
     const rect = pianoRollCanvas.getBoundingClientRect();
     const scaleX = pianoRollCanvas.width / rect.width;
     const scaleY = pianoRollCanvas.height / rect.height;
@@ -3720,7 +4036,7 @@ prevSrc.onended = () => {
       const dxBeats = (mouseX - dragState.startX) / PIXELS_PER_BEAT;
       const gridType = container.querySelector("#gridType").value || "beats";
       const stepsPerBeat = Math.max(1, parseInt(container.querySelector("#stepsPerBeat").value) || 4);
-      const snapResolution = gridType === "steps" ? 1.0 / stepsPerBeat : 0.25;
+      const snapResolution = getPianoRollSnapResolution();
 
       if (dragState.type === "move") {
         let newStart = dragState.origStartBeat + dxBeats;
@@ -3795,11 +4111,33 @@ prevSrc.onended = () => {
     }
   });
 
+  pianoRollCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  pianoRollContainer.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    const rect = pianoRollCanvas.getBoundingClientRect();
+    const cursorX = event.clientX - rect.left;
+    const beatAtCursor = (cursorX + pianoRollContainer.scrollLeft - KEYBOARD_WIDTH) / PIXELS_PER_BEAT;
+    const zoomFactor = Math.exp(-event.deltaY * 0.001);
+    PIXELS_PER_BEAT = Math.max(40, Math.min(500, PIXELS_PER_BEAT * zoomFactor));
+    drawPianoRoll();
+    pianoRollContainer.scrollLeft = Math.max(0, KEYBOARD_WIDTH + beatAtCursor * PIXELS_PER_BEAT - cursorX);
+  }, { passive: false });
+
+  pianoRollSnapType.addEventListener("change", drawPianoRoll);
+
   window.addEventListener("mouseup", () => {
     if (dragState) {
+      const draggedNotes = dragState.selectedNotes || [];
       dragState = null;
       skipReparse = false;
+      pianoRollNotes.sort((a, b) => a.startBeat - b.startBeat || a.midiNote - b.midiNote);
+      selectedNoteIndexes = new Set(draggedNotes.map(note => pianoRollNotes.indexOf(note)).filter(index => index >= 0));
+      selectedNoteIndex = selectedNoteIndexes.size > 0 ? Math.min(...selectedNoteIndexes) : -1;
+      updateTextFromPianoRoll();
       drawPianoRoll();
+      updatePianoRollPanel();
     }
     if (selectionState) {
       // Finalize the marquee selection: select any notes whose rectangle
@@ -3849,22 +4187,25 @@ prevSrc.onended = () => {
 
 // Delete key to remove all selected notes
   document.addEventListener("keydown", (e) => {
+    const pianoRollFocused = document.activeElement === pianoRollCanvas || pianoRollContainer.contains(document.activeElement);
+    if (!pianoRollFocused) return;
+    if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      const current = pianoRollSnapshot();
+      const previous = pianoRollHistory.pop();
+      if (previous) { pianoRollRedo.push(current); restorePianoRollSnapshot(previous); }
+      return;
+    }
+    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      const current = pianoRollSnapshot();
+      const next = pianoRollRedo.pop();
+      if (next) { pianoRollHistory.push(current); restorePianoRollSnapshot(next); }
+      return;
+    }
     if (e.key === "Delete" || e.key === "Backspace") {
-      // Only if piano roll is visible and focused
-      if (document.activeElement === pianoRollCanvas || document.activeElement === pianoRollContainer) {
-        e.preventDefault();
-        if (selectedNoteIndexes.size > 0) {
-          // Remove all selected notes (descending index to avoid shifting).
-          const idxs = [...selectedNoteIndexes].sort((a, b) => b - a);
-          for (const idx of idxs) {
-            if (idx >= 0 && idx < pianoRollNotes.length) pianoRollNotes.splice(idx, 1);
-          }
-          selectedNoteIndexes.clear();
-          selectedNoteIndex = -1;
-          updateTextFromPianoRoll();
-          drawPianoRoll();
-        }
-      }
+      e.preventDefault();
+      deleteSelectedPianoRollNotes();
     }
   });
 
