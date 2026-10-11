@@ -1,5 +1,5 @@
 (async () => {
-  const sampleRate = 44100;
+  let sampleRate = 44100;
 
   // voice cloning and gender variables
   let genderShift = 0; // -100 (male) to 100 (female)
@@ -22,18 +22,32 @@
   let oscType = "rosenberg";        // rosenberg(default) | sawtooth | square | custom
   let customOscSample = null;       // decoded Float32Array for custom waveform
   let customOscSampleRate = 44100;
+  let synthesisMethod = "synthesized";
+  const concatenativeSamples = new Map();
+  const concatenativeRequiredPhonemes = [
+    "a", "ae", "aa", "e", "i", "ee", "o", "u", "y", "w", "r", "l",
+    "h", "s", "z", "zh", "t", "d", "dx", "k", "g", "gx", "m", "n", "b", "bx",
+    "p", "f", "v", "th", "dh", "sh", "ch", "uh", "er", "jh", "ng", "ih", "rest"
+  ];
   const ROSENBERG_GAIN_BOOST = 1.7;
-  const NOISE_GAIN_BOOST = 1.15;
+  const NOISE_GAIN_BOOST = 1.55;
 
   // preview playback state (shared so re-synthesizing stops any playing preview)
   let actx = null;
   let prevSrc = null;
   let previewBuf = null;
+  let previewFrameId = null;
+  let drawPreviewWaveform = null;
   let lastRenderedAudio = null;
   let lastRenderedPhonemes = null;
 
 const stopPreview = () => {
   stopVisualAnim();
+    if (previewFrameId !== null) {
+      cancelAnimationFrame(previewFrameId);
+      previewFrameId = null;
+    }
+    drawPreviewWaveform?.(null);
     if (prevSrc) {
       try {
         prevSrc.onended = null;
@@ -82,10 +96,10 @@ const stopPreview = () => {
   };
 
   // personal dictionary persistence functions
-  function savePersonalDict() {
+  function savePersonalDict(silent = false) {
     try {
       localStorage.setItem('personalDict', JSON.stringify(personalDict));
-      console.log('Personal dictionary saved.');
+      if (!silent) console.log('Personal dictionary saved.');
     } catch (e) {
       console.warn('Failed to save personal dictionary:', e);
     }
@@ -181,6 +195,7 @@ const stopPreview = () => {
   const phonemeMap = {
     // --- VOWELS & LIQUIDS ---
     a:   { f: [700, 1220, 2600, 3500, 4500, 5500], voiced: true },
+    ax:   { f: [620, 1220, 2550, 3500, 4500, 5500], voiced: true },
     ae:  { f: [620, 1660, 2430, 3700, 4700, 5700], voiced: true, morphTo: [650, 1490, 2470, 3700, 4700, 5700] },
     aa:  { f: [900, 1300, 2650, 3550, 4500, 5500], voiced: true },
     e:   { f: [530, 1680, 2500, 3600, 4600, 5600], voiced: true, morphTo: [620, 1530, 2530, 3600, 4600, 5600] },
@@ -198,7 +213,7 @@ const stopPreview = () => {
     s:  { f: [320, 1390, 5500, 5900, 6800, 7800], breathy: true, amp: 1.4, voiced: false, noiseAmp: 1 },
     z:  { f: [240, 1390, 5500, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.185 },
     zh: { f: [270, 1840, 2750, 5800, 6700, 7700], breathy: true, amp: 1.4, voiced: true,  noiseAmp: 0.2 },
-    t:  { f: [400,  1600, 2600, 4900, 5900, 6900], burst: true, amp: 0.6, voiced: false, noiseAmp: 1, morphs: false },
+    t:  { f: [400,  1600, 2600, 4900, 5900, 6900], burst: true, amp: 0.9, voiced: false, noiseAmp: 1.4, morphs: false },
     d:  { f: [200,  1600, 2600, 3800, 4800, 5800], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: 0.2, morphs: false },
     dx:  { f: [200,  1600, 2600, 3800, 4800, 5800], breathy: true, burst: true, amp: 0.55, voiced: true, short: true, noiseAmp: 0.02, morphs: false },
     k:  { f: [300, 1990, 2850, 4100, 5100, 6100], burst: true, short: true, voiced: false, noiseAmp: 1 },
@@ -217,7 +232,7 @@ const stopPreview = () => {
     th: { f: [1150, 2150, 3450, 4500, 5500, 6500], breathy: true, voiced: false, noiseAmp: 1 },
     dh: { f: [270,  1290, 2540, 3800, 4800, 5800], breathy: true, voiced: true, noiseAmp: 0.25, amp: 0.55 },
     sh: { f: [2450, 3050, 3950, 4900, 5900, 6900], breathy: true, voiced: false, noiseAmp: 1 },
-    ch: { f: [350, 1800, 2820, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1 },
+    ch: { f: [350, 1800, 2820, 5400, 6400, 7400], breathy: true, burst: true, voiced: false, noiseAmp: 1, usePinkNoise: true },
     uh: { f: [450,  1100,  2350, 3500, 4500, 5500], voiced: true },
 
     // --- ADDED PHONES & DIPHTHONGS ---
@@ -242,6 +257,7 @@ const stopPreview = () => {
     eu: { f: [300, 2000, 2800, 3600, 4600, 5600], morphTo: [325, 700,  2530, 3300, 4300, 5300], voiced: true },
     ey: { f: [530, 1680, 2500, 3600, 4600, 5600], morphTo: [300, 2000, 2800, 3600, 4600, 5600], voiced: true },
     el: { f: [530, 1680, 2500, 3600, 4600, 5600], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
+    ex: { f: [500, 1700, 2300, 3600, 4600, 5600], voiced: true },
 
     uw: { f: [350, 1250, 2200, 3300, 4300, 5300], morphTo: [320, 900, 2200, 3300, 4300, 5300], voiced: true },
     ul: { f: [350, 1250, 2200, 3300, 4300, 5300], morphTo: [310, 1050, 2880, 3500, 4500, 5500], voiced: true },
@@ -297,6 +313,7 @@ const stopPreview = () => {
     "f", "v", "w", "y", "th", "dh", "sh", "ch", "jh", "ng", "dx", "gx", "bx",
     "zh",
   ]);
+  const DYNAMIC_STOPS = new Set(["t", "p", "d", "b", "k", "g", "dx", "bx", "gx"]);
 
   function arpabetToKeys(arpArr) {
     const out = [];
@@ -597,15 +614,15 @@ const stopPreview = () => {
 
   // Whisper should preserve the natural noise color of each phoneme: white for
   // unvoiced fricatives/bursts, pink for voiced/aspirated noise.
-  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09, { voiced = false } = {}) => {
-    return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
+  const createWhisperNoiseBuffer = (ctx, duration, amp = 0.09, { voiced = false, usePinkNoise = false } = {}) => {
+    return (voiced || usePinkNoise) ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
   };
 
   // Pick noise type by phonation.
   // voiced fricatives/aspiration => pink
   // unvoiced fricatives/bursts => white
-  const createFricativeNoiseBuffer = (ctx, duration, { voiced = false, amp = 0.0 } = {}) => {
-    return voiced ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
+  const createFricativeNoiseBuffer = (ctx, duration, { voiced = false, amp = 0.0, usePinkNoise = false } = {}) => {
+    return (usePinkNoise || voiced) ? createPinkNoiseBuffer(ctx, duration, amp) : createWhiteNoiseBuffer(ctx, duration, amp);
   };
 
   const getVoicedGain = (amp) => amp * 0.89 * (oscType === "rosenberg" ? ROSENBERG_GAIN_BOOST : 1);
@@ -786,8 +803,406 @@ const stopPreview = () => {
     return osc;
   };
 
+  const estimateSampleFormants = (buffer) => {
+    const data = buffer.getChannelData(0);
+    const sampleCount = Math.min(data.length, 4096);
+    const bins = 256;
+    const order = 12;
+    const autocorrelation = new Float64Array(order + 1);
+    for (let lag = 0; lag <= order; lag++) {
+      for (let i = 0; i < sampleCount - lag; i++) autocorrelation[lag] += data[i] * data[i + lag];
+    }
+    const lpc = new Float64Array(order + 1);
+    lpc[0] = 1;
+    let error = autocorrelation[0] || 1;
+    for (let i = 1; i <= order; i++) {
+      let reflection = autocorrelation[i];
+      for (let j = 1; j < i; j++) reflection -= lpc[j] * autocorrelation[i - j];
+      reflection /= Math.max(error, 1e-9);
+      const previous = lpc.slice();
+      lpc[i] = reflection;
+      for (let j = 1; j < i; j++) lpc[j] = previous[j] - reflection * previous[i - j];
+      error *= Math.max(0.001, 1 - reflection * reflection);
+    }
+    const spectrum = new Float32Array(bins);
+    for (let bin = 0; bin < bins; bin++) {
+      const frequency = (bin + 1) * buffer.sampleRate / (bins * 2);
+      let real = 0;
+      let imag = 0;
+      const phaseStep = 2 * Math.PI * frequency / buffer.sampleRate;
+      for (let i = 0; i <= order; i++) {
+        real += lpc[i] * Math.cos(phaseStep * i);
+        imag -= lpc[i] * Math.sin(phaseStep * i);
+      }
+      spectrum[bin] = 1 / Math.max(1e-6, Math.hypot(real, imag));
+    }
+    const formants = [];
+    for (let bin = 2; bin < bins - 2 && formants.length < ENGINE_FORMANTS; bin++) {
+      if (spectrum[bin] >= spectrum[bin - 1] && spectrum[bin] >= spectrum[bin + 1]) {
+        const frequency = (bin + 1) * buffer.sampleRate / (bins * 2);
+        if (frequency >= 180 && frequency <= 7000 && (!formants.length || frequency > formants[formants.length - 1] + 180)) {
+          formants.push(frequency);
+        }
+      }
+    }
+    return formants.concat([700, 1800, 3000]).slice(0, ENGINE_FORMANTS);
+  };
+
+  const estimateSamplePitch = (buffer) => {
+    const data = buffer.getChannelData(0);
+    const sampleCount = Math.min(data.length, 16384);
+    if (sampleCount < 4) return 140;
+    let mean = 0;
+    for (let i = 0; i < sampleCount; i++) mean += data[i];
+    mean /= sampleCount;
+    const centered = new Float32Array(sampleCount);
+    let energy = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      centered[i] = data[i] - mean;
+      energy += centered[i] * centered[i];
+    }
+    if (energy < 1e-8) return 140;
+    const minLag = Math.max(1, Math.floor(buffer.sampleRate / 500));
+    const maxLag = Math.min(Math.floor(buffer.sampleRate / 50), sampleCount - 2);
+    let bestLag = Math.floor(buffer.sampleRate / 140);
+    let bestCorrelation = 0;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let correlation = 0;
+      let lagEnergy = 0;
+      const count = sampleCount - lag;
+      for (let i = 0; i < count; i++) {
+        correlation += centered[i] * centered[i + lag];
+        lagEnergy += centered[i + lag] * centered[i + lag];
+      }
+      correlation /= Math.sqrt(Math.max(1e-12, energy * lagEnergy));
+      if (correlation > bestCorrelation) {
+        bestCorrelation = correlation;
+        bestLag = lag;
+      }
+    }
+    return bestCorrelation > 0.15 ? buffer.sampleRate / Math.max(1, bestLag) : 140;
+  };
+
+  const concatenativeCompositeCache = new WeakMap();
+  const concatenativePreparedCache = new WeakMap();
+  const getPreparedConcatenativeSample = (ctx, sample) => {
+    let prepared = concatenativePreparedCache.get(sample);
+    if (!prepared) {
+      prepared = new WeakMap();
+      concatenativePreparedCache.set(sample, prepared);
+    }
+    if (prepared.has(ctx)) return prepared.get(ctx);
+
+    const input = sample.buffer.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < input.length; i++) peak = Math.max(peak, Math.abs(input[i]));
+    const threshold = Math.max(0.002, peak * 0.02);
+    let first = 0;
+    let last = input.length - 1;
+    while (first < input.length && Math.abs(input[first]) < threshold) first++;
+    while (last > first && Math.abs(input[last]) < threshold) last--;
+    if (first >= last) { first = 0; last = input.length - 1; }
+
+    const trimmedLength = Math.max(1, last - first + 1);
+    const impulseThreshold = Math.floor(sample.buffer.sampleRate * 0.12);
+    const sourceLength = trimmedLength > impulseThreshold ? Math.floor(trimmedLength / 2) : trimmedLength;
+    const outputLength = Math.max(1, Math.floor(sourceLength * ctx.sampleRate / sample.buffer.sampleRate));
+    const source = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const sourcePosition = first + i * sample.buffer.sampleRate / ctx.sampleRate;
+      const lower = Math.min(input.length - 1, Math.floor(sourcePosition));
+      const fraction = sourcePosition - lower;
+      const next = Math.min(lower + 1, input.length - 1);
+      source[i] = input[lower] * (1 - fraction) + input[next] * fraction;
+    }
+
+    const loopLength = source.length;
+    const crossfadeLength = Math.max(1, Math.floor(loopLength * 0.5));
+    const loopData = new Float32Array(loopLength);
+    loopData.set(source);
+    for (let i = 0; i < crossfadeLength; i++) {
+      const position = loopLength - crossfadeLength + i;
+      const fade = (i + 1) / (crossfadeLength + 1);
+      loopData[position] = source[position] * (1 - fade) + source[i] * fade;
+    }
+
+    const buffer = ctx.createBuffer(1, loopLength, ctx.sampleRate);
+    buffer.getChannelData(0).set(loopData);
+    const result = { ...sample, buffer, loopEnd: buffer.duration };
+    prepared.set(ctx, result);
+    return result;
+  };
+
+  const findConcatenativePhoneme = (formants, excludedKey = null) => {
+    let closestKey = null;
+    let closestDistance = Infinity;
+    for (const key of concatenativeRequiredPhonemes) {
+      const candidate = phonemeMap[key]?.f;
+      if (key === excludedKey || !candidate || !concatenativeSamples.has(key)) continue;
+      let distance = 0;
+      for (let index = 0; index < ENGINE_FORMANTS; index++) {
+        distance += Math.abs(Math.log(Math.max(1, formants[index]) / Math.max(1, candidate[index])));
+      }
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestKey = key;
+      }
+    }
+    return closestKey;
+  };
+
+  const getConcatenativeSample = (ctx, key, phoneme = null, morphEnabled = false) => {
+    const direct = concatenativeSamples.get(key);
+    if (direct) return direct;
+    if (key === "rest" || key.length < 2 || !/^[a-z]+$/.test(key)) return null;
+    let cached = concatenativeCompositeCache.get(ctx);
+    if (!cached) {
+      cached = new Map();
+      concatenativeCompositeCache.set(ctx, cached);
+    }
+    if (cached.has(key)) return cached.get(key);
+
+    if (morphEnabled && phoneme?.morphTo?.length >= MAP_FORMANTS) {
+      const mapEntry = phonemeMap[key];
+      const sourceKey = findConcatenativePhoneme(mapEntry?.f || phoneme.f, key);
+      const targetKey = findConcatenativePhoneme(mapEntry?.morphTo || phoneme.morphTo, key);
+      const source = sourceKey && concatenativeSamples.get(sourceKey);
+      const target = targetKey && concatenativeSamples.get(targetKey);
+      if (source && target) {
+        const sourceSample = getPreparedConcatenativeSample(ctx, source);
+        const targetSample = getPreparedConcatenativeSample(ctx, target);
+        const sourceData = sourceSample.buffer.getChannelData(0);
+        const targetData = targetSample.buffer.getChannelData(0);
+        const length = Math.max(sourceData.length, targetData.length);
+        const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+        const output = buffer.getChannelData(0);
+        for (let index = 0; index < length; index++) {
+          const progress = length > 1 ? index / (length - 1) : 1;
+          const sourcePosition = (index / length * sourceData.length) % sourceData.length;
+          const targetPosition = (index / length * targetData.length) % targetData.length;
+          const sourceIndex = Math.floor(sourcePosition);
+          const targetIndex = Math.floor(targetPosition);
+          const sourceValue = sourceData[sourceIndex] * (1 - sourcePosition % 1) + sourceData[(sourceIndex + 1) % sourceData.length] * (sourcePosition % 1);
+          const targetValue = targetData[targetIndex] * (1 - targetPosition % 1) + targetData[(targetIndex + 1) % targetData.length] * (targetPosition % 1);
+          const angle = progress * Math.PI * 0.5;
+          output[index] = sourceValue * Math.cos(angle) + targetValue * Math.sin(angle);
+        }
+        const composite = {
+          buffer,
+          formants: source.formants.map((value, index) => (value + target.formants[index]) / 2),
+          pitch: (source.pitch + target.pitch) / 2,
+          fileName: `${sourceKey}-${targetKey}`,
+          fileType: "morph composite"
+        };
+        cached.set(key, composite);
+        return composite;
+      }
+    }
+
+    const parts = [...key].map(part => concatenativeSamples.get(part));
+    if (parts.length !== key.length || parts.some(part => !part)) return null;
+    const length = parts.reduce((total, part) => total + Math.max(1, Math.floor(part.buffer.duration * ctx.sampleRate)), 0);
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const output = buffer.getChannelData(0);
+    let offset = 0;
+    for (const part of parts) {
+      const input = part.buffer.getChannelData(0);
+      const count = Math.max(1, Math.floor(part.buffer.duration * ctx.sampleRate));
+      for (let i = 0; i < count; i++) {
+        const sourcePosition = i * part.buffer.sampleRate / ctx.sampleRate;
+        const lower = Math.floor(sourcePosition);
+        const fraction = sourcePosition - lower;
+        const next = Math.min(lower + 1, input.length - 1);
+        output[offset + i] = input[lower] * (1 - fraction) + input[next] * fraction;
+      }
+      offset += count;
+    }
+    const compositeData = buffer.getChannelData(0);
+    const crossfadeLength = Math.max(1, Math.floor(Math.min(parts[0].buffer.length || compositeData.length, compositeData.length) * 0.5));
+    for (let i = 0; i < Math.min(crossfadeLength, compositeData.length); i++) {
+      const position = compositeData.length - Math.min(crossfadeLength, compositeData.length) + i;
+      const fade = (i + 1) / (Math.min(crossfadeLength, compositeData.length) + 1);
+      compositeData[position] = compositeData[position] * (1 - fade) + compositeData[i] * fade;
+    }
+    const composite = {
+      buffer,
+      formants: parts.reduce((sum, part) => sum.map((value, index) => value + part.formants[index]), [0, 0, 0]).map(value => value / parts.length),
+      pitch: parts.reduce((sum, part) => sum + part.pitch, 0) / parts.length,
+      fileName: key,
+      fileType: "composite"
+    };
+    cached.set(key, composite);
+    return composite;
+  };
+
+  const renderConcatenative = async (ctx, phonemeSeq, mode, morphTime, morphEnabled, slideTime = 0.08, portamento = 0.08, vibFreq = 0, vibDepth = 0, vibDelay = 0, persistentVib = true, vibFadeIn = 0) => {
+    const master = ctx.createGain();
+    master.gain.value = 0.92;
+    master.connect(ctx.destination);
+    let time = 0;
+    let previousFormants = null;
+
+    for (let index = 0; index < phonemeSeq.length; index++) {
+      const phoneme = phonemeSeq[index];
+      const duration = Math.max(0.001, phoneme.d);
+      const next = phonemeSeq[index + 1];
+      const rawSample = getConcatenativeSample(ctx, phoneme.key, phoneme, morphEnabled) || (phoneme.key === "rest" ? null : concatenativeSamples.get("rest"));
+      const sample = rawSample ? getPreparedConcatenativeSample(ctx, rawSample) : null;
+      if (!sample) {
+        time += duration;
+        previousFormants = null;
+        continue;
+      }
+
+      const sourcePitch = Number.isFinite(sample.pitch) && sample.pitch > 0 ? sample.pitch : 140;
+      const targetPitch = Number.isFinite(phoneme.pitch) && phoneme.pitch > 0 ? phoneme.pitch : sourcePitch;
+      const pitchRatio = targetPitch / sourcePitch;
+      const nextPitch = next && next.voiced && Number.isFinite(next.pitch) && next.pitch > 0 ? next.pitch : targetPitch;
+      const glideRatio = nextPitch / sourcePitch;
+      const glideDuration = Math.min(duration, Math.max(0, Number(slideTime) || 0));
+      const gain = ctx.createGain();
+      const nextRawSample = next ? getConcatenativeSample(ctx, next.key, next, morphEnabled) : null;
+      const releaseTime = nextRawSample ? Math.min(0.05, duration * 0.3, Math.max(0.001, next.d) * 0.3) : 0;
+      const fade = Math.min(0.012, duration * 0.12, releaseTime || duration * 0.12);
+      const level = mode === "whisper" ? 0.72 : 1;
+      gain.gain.setValueAtTime(0, time);
+      gain.gain.linearRampToValueAtTime(level, time + fade);
+      gain.gain.setValueAtTime(level, time + Math.max(fade, duration - Math.max(releaseTime, fade)));
+      gain.gain.linearRampToValueAtTime(0, time + duration);
+
+      const baseFormants = phonemeMap[phoneme.key]?.f || phoneme.f || [700, 1220, 2600];
+      const adjustedFormants = phoneme.f || baseFormants;
+      const formantScale = adjustedFormants.map((value, formantIndex) =>
+        value > 0 && baseFormants[formantIndex] > 0 ? value / baseFormants[formantIndex] : 1
+      );
+      const formants = sample.formants.map((frequency, formantIndex) =>
+        frequency * (formantScale[formantIndex] || 1)
+      );
+      const scheduleFormantMorph = (parameter, start, target, startTime, morphDuration) => {
+        if (!(start > 0) || !(target > 0) || morphDuration <= 0) return;
+        const curve = new Float32Array(33);
+        const logStart = Math.log(start);
+        const logDistance = Math.log(target) - logStart;
+        for (let point = 0; point < curve.length; point++) {
+          const progress = point / (curve.length - 1);
+          const eased = progress * progress * (3 - 2 * progress);
+          curve[point] = Math.exp(logStart + logDistance * eased);
+        }
+        parameter.setValueCurveAtTime(curve, startTime, morphDuration);
+      };
+      const filters = formants.map((frequency, filterIndex) => {
+        const filter = ctx.createBiquadFilter();
+        filter.type = "bandpass";
+        filter.Q.value = 5;
+        const start = previousFormants?.[filterIndex] || frequency;
+        const morphBase = phonemeMap[phoneme.key]?.morphTo || baseFormants;
+        const morphScale = phoneme.morphTo?.[filterIndex] && morphBase[filterIndex]
+          ? phoneme.morphTo[filterIndex] / morphBase[filterIndex]
+          : formantScale[filterIndex] || 1;
+        const target = sample.formants[filterIndex] * (formantScale[filterIndex] || 1) * morphScale;
+        const coarticulationTime = morphEnabled && morphTime > 0 && previousFormants
+          ? Math.min(morphTime, duration * 0.35)
+          : 0;
+        if (coarticulationTime > 0) {
+          scheduleFormantMorph(filter.frequency, start, frequency, time, coarticulationTime);
+        } else {
+          filter.frequency.setValueAtTime(frequency, time);
+        }
+        if (morphEnabled && phoneme.morphTo?.[filterIndex]) {
+          scheduleFormantMorph(
+            filter.frequency,
+            frequency,
+            target,
+            time + coarticulationTime,
+            duration - coarticulationTime
+          );
+        }
+        return filter;
+      });
+      const dryGain = ctx.createGain();
+      dryGain.gain.value = filters.length ? 0.08 : 1;
+      gain.connect(dryGain).connect(master);
+      for (const filter of filters) {
+        const wetGain = ctx.createGain();
+        wetGain.gain.value = 0.32;
+        gain.connect(filter).connect(wetGain).connect(master);
+      }
+      const phonemeVibFreq = Number.isFinite(phoneme.vibFreq) ? phoneme.vibFreq : vibFreq;
+      const phonemeVibDepth = Number.isFinite(phoneme.vibDepth) ? phoneme.vibDepth : vibDepth;
+      const phonemeVibDelay = Number.isFinite(phoneme.vibDelay) ? phoneme.vibDelay : vibDelay;
+      const phonemeVibFade = Number.isFinite(phoneme.vibFadeIn) ? phoneme.vibFadeIn : vibFadeIn;
+      const phonemeVibFadeOut = Number.isFinite(phoneme.vibFadeOut) ? phoneme.vibFadeOut : 0;
+      const phonemePortamento = resolvePortamento(phoneme.portamento ?? portamento, portamento, duration);
+      const phonemeSlide = resolvePortamento(phoneme.slideTime ?? slideTime, slideTime, duration);
+      const activeGlideDuration = Math.min(duration, Math.max(0, phonemeSlide));
+      const glideStart = duration - activeGlideDuration;
+      const glideTarget = phonemePortamento > 0 ? pitchRatio + 0.5 * (glideRatio - pitchRatio) : glideRatio;
+      const sourcePeriod = 1 / sourcePitch;
+      const segmentFrameCount = Math.max(1, Math.ceil(duration * ctx.sampleRate));
+      const segmentData = new Float32Array(segmentFrameCount);
+      const segmentWeights = new Float32Array(segmentFrameCount);
+      const sampleData = sample.buffer.getChannelData(0);
+      let grainOffset = 0;
+      let grainIndex = 0;
+      while (grainOffset < duration) {
+        const centerTime = Math.min(duration, grainOffset + sourcePeriod);
+        const slideProgress = activeGlideDuration > 0 && next?.voiced
+          ? Math.max(0, Math.min(1, (centerTime - glideStart) / activeGlideDuration))
+          : 0;
+        const currentRatio = pitchRatio + (glideTarget - pitchRatio) * slideProgress;
+        let currentPitch = sourcePitch * currentRatio;
+        if (mode !== "whisper" && phonemeVibFreq > 0 && phonemeVibDepth > 0 && centerTime >= phonemeVibDelay) {
+          const vibElapsed = persistentVib ? time + centerTime - phonemeVibDelay : centerTime - phonemeVibDelay;
+          const fadeInProgress = phonemeVibFade > 0 ? Math.min(1, (centerTime - phonemeVibDelay) / phonemeVibFade) : 1;
+          const fadeOutProgress = phonemeVibFadeOut > 0 ? Math.min(1, (duration - centerTime) / phonemeVibFadeOut) : 1;
+          const fadeProgress = Math.min(fadeInProgress, fadeOutProgress);
+          currentPitch += Math.sin(2 * Math.PI * phonemeVibFreq * vibElapsed) * phonemeVibDepth * fadeProgress;
+        }
+        currentPitch = Math.max(40, Math.min(1000, currentPitch));
+        const targetPeriod = 1 / currentPitch;
+        const grainLength = Math.min(phoneme.voiced ? 0.12 : 0.02, phoneme.voiced ? 2 * Math.max(sourcePeriod, targetPeriod) : 0.02, duration - grainOffset);
+        const grainStartFrame = Math.floor(grainOffset * ctx.sampleRate);
+        const grainLengthFrames = Math.max(1, Math.min(segmentFrameCount - grainStartFrame, Math.ceil(grainLength * ctx.sampleRate)));
+        const offsetFrames = phoneme.voiced
+          ? (grainIndex * sourcePeriod * ctx.sampleRate) % sampleData.length
+          : (grainIndex * 0.02 * ctx.sampleRate) % sampleData.length;
+        for (let frame = 0; frame < grainLengthFrames; frame++) {
+          const phase = frame / grainLengthFrames;
+          const window = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase);
+          const samplePosition = (offsetFrames + frame) % sampleData.length;
+          const sampleIndex = Math.floor(samplePosition);
+          const fraction = samplePosition - sampleIndex;
+          const nextIndex = (sampleIndex + 1) % sampleData.length;
+          const value = sampleData[sampleIndex] * (1 - fraction) + sampleData[nextIndex] * fraction;
+          segmentData[grainStartFrame + frame] += value * window;
+          segmentWeights[grainStartFrame + frame] += window;
+        }
+        grainOffset += phoneme.voiced ? targetPeriod : 0.01;
+        grainIndex++;
+      }
+      for (let frame = 0; frame < segmentFrameCount; frame++) {
+        if (segmentWeights[frame] > 1e-4) segmentData[frame] /= segmentWeights[frame];
+      }
+      const segmentBuffer = ctx.createBuffer(1, segmentFrameCount, ctx.sampleRate);
+      segmentBuffer.getChannelData(0).set(segmentData);
+      const source = ctx.createBufferSource();
+      source.buffer = segmentBuffer;
+      source.connect(gain);
+      source.start(time);
+      source.stop(time + duration + 0.001);
+      previousFormants = formants;
+      // Every phoneme owns its full parsed time slot; sample release must not shift later notes.
+      time += duration;
+      if (next?.key === "rest") previousFormants = null;
+    }
+    return await ctx.startRendering();
+  };
+
   // synthesize with nasal-aware transitions and humanizing features
-  const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, portamento = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1, globalVibFadeIn = 0) => {
+  const synthesize = async (ctx, phonemeSeq, mode, vibFreq, vibDepth, vibDelay, morphTime = 0.05, morphEnabled = true, slideTime = 0.08, portamento = 0.08, persistentVib = true, dynamicMode = false, consonantDuration = 0.1, globalVibFadeIn = 0, method = synthesisMethod, beatLength = 0.5) => {
+    if (method === "concatenative") {
+      return renderConcatenative(ctx, phonemeSeq, mode, morphTime, morphEnabled, slideTime, portamento, vibFreq, vibDepth, vibDelay, persistentVib, globalVibFadeIn);
+    }
     // Preprocess phonemeSeq for humanizing features
     const processedSeq = [];
     for (let i = 0; i < phonemeSeq.length; i++) {
@@ -796,14 +1211,14 @@ const stopPreview = () => {
       const hasPrevVoiced = prev && prev.voiced;
 
       // Feature 3: If b and no previous voiced, prepend m
-      if (p.key === 'b' && !hasPrevVoiced) {
-        // Prepend a brief m, but keep it quieter to avoid loud noise bursts.
-        // 40% quieter than normal m -> amp scale 0.6
-        const mDur = Math.min(0.05, p.d * 0.1); // short m
-        const mPhoneme = { key: 'm', ...phonemeMap['m'], d: mDur, pitch: p.pitch, amp: (phonemeMap['m'].amp ?? 1) * 0.6 };
-        processedSeq.push(mPhoneme);
-        p.d -= mDur; // trim p/b duration
-      }
+      // if (p.key === 'b' && !hasPrevVoiced) {
+      //   // Prepend a brief m, but keep it quieter to avoid loud noise bursts.
+      //   // 40% quieter than normal m -> amp scale 0.6
+      //   const mDur = Math.min(0.05, p.d * 0.1); // short m
+      //   const mPhoneme = { key: 'm', ...phonemeMap['m'], d: mDur, pitch: p.pitch, amp: (phonemeMap['m'].amp ?? 1) * 0.6 };
+      //   processedSeq.push(mPhoneme);
+      //   p.d -= mDur; // trim p/b duration
+      // }
 
 
 
@@ -815,12 +1230,8 @@ const stopPreview = () => {
         // silence is implicit by delaying start
       }
 
-      // In dynamic mode, /s/ anticipates an adjacent stop by fading to silence (formerly)
-      // before the stop begins. Standalone consonants keep their token duration.
       const nextKey = phonemeSeq[i + 1]?.key;
-      //if (p.key === "s" || p.key === "z") {
-        p.dynamicFadeOut = nextKey === "t" || nextKey === "p" || nextKey === "d" || nextKey === "b" || nextKey === "k" || nextKey === "p" || nextKey === "k" || nextKey === "b" || nextKey === "g" ;
-      //}
+      p.dynamicFadeOut = DYNAMIC_STOPS.has(nextKey);
 
       processedSeq.push(p);
     }
@@ -841,7 +1252,7 @@ const stopPreview = () => {
       for (let i = 0; i < numFormants; i++) {
         const f = ctx.createBiquadFilter();
         f.type = "bandpass";
-        f.Q.value = 15;
+        f.Q.value = 10;
         f.frequency.value = 0;
         const g = ctx.createGain();
         g.gain.value = 1; // normal full vowel energy
@@ -873,7 +1284,7 @@ const stopPreview = () => {
       for (let i = 0; i < numFormants; i++) {
         const f = ctx.createBiquadFilter();
         f.type = "bandpass";
-        f.Q.value = 15;
+        f.Q.value = 10;
         f.frequency.value = 0;
         f.connect(master);
         sharedNoiseFilters.push(f);
@@ -989,7 +1400,7 @@ const stopPreview = () => {
 
       const dur = Math.max(0.001, morphEnd - morphStart);
       const src = ctx.createBufferSource();
-      src.buffer = createFricativeNoiseBuffer(ctx, dur + 0.02, { voiced: true, amp: 0.1 });
+      src.buffer = createFricativeNoiseBuffer(ctx, dur + 0.02, { voiced: true, amp: 0.1, usePinkNoise: false });
 
       // envelope: ramp in at morphStart, ramp out at morphEnd
       nasalGain.gain.setValueAtTime(0, morphStart - 0.001);
@@ -1004,7 +1415,7 @@ const stopPreview = () => {
 
 
     // consonant noise generator with subtle fade-in
-      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0, fadeToSilence = false, fadeInRatio = 0, voiced = false) => {
+      const playConsonantNoise = (t, d, fArr, amp = 1, noiseAmp = 1, fadeOutRatio = 0, fadeToSilence = false, fadeInRatio = 0, voiced = false, usePinkNoise = false) => {
       if (d <= 0 || !fArr || fArr.length === 0) return;
       const src = ctx.createBufferSource();
         // White noise for unvoiced fricatives/bursts, pink for voiced breathy
@@ -1012,7 +1423,7 @@ const stopPreview = () => {
         // especially when whisper mode is enabled and when the filter is disabled.
       // quiet base so voice dominates (fixes nasal artifact audibility)
       // amp param is used only for envelope peak.
-      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced, amp: 0.015 * noiseAmp });
+      src.buffer = createFricativeNoiseBuffer(ctx, d, { voiced, amp: 0.015 * noiseAmp, usePinkNoise });
 
 
       const consonantGain = ctx.createGain();
@@ -1025,16 +1436,18 @@ const stopPreview = () => {
       consonantGain.gain.setValueAtTime(0, t);
       consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp, t + fadeInDuration); // subtle fade-in over 0.01s
       if (fadeToSilence) {
-        const fadeEnd = t + d * 0.95;
+        const fadeStart = Math.max(t + fadeInDuration, t + d * 0.8);
+        const fadeEnd = t + d;
+        consonantGain.gain.setValueAtTime(amp * noiseAmp, fadeStart);
         consonantGain.gain.linearRampToValueAtTime(0, fadeEnd);
         consonantGain.gain.setValueAtTime(0, t + d);
       } else {
         consonantGain.gain.linearRampToValueAtTime(amp * noiseAmp * fadeEndRatio, t + d);
       }
-      const consonantFilters = !disableFormantFilter && fArr ? fArr.map(freq => {
+      const consonantFilters = !disableFormantFilter && fArr ? fArr.slice(0, numFormants).map(freq => {
         const bf = ctx.createBiquadFilter();
         bf.type = "bandpass";
-        bf.Q.value = 20;
+        bf.Q.value = 12;
         bf.frequency.value = freq || 0;
         bf.connect(master);
         return bf;
@@ -1076,7 +1489,10 @@ const stopPreview = () => {
       const noiseAmp = config.noiseAmp ?? 1;
       const voicedNoise = !!config.voiced;
       const src = ctx.createBufferSource();
-      src.buffer = createWhisperNoiseBuffer(ctx, d, 0.08 * noiseAmp, { voiced: voicedNoise });
+      src.buffer = createWhisperNoiseBuffer(ctx, d, 0.08 * noiseAmp, {
+        voiced: voicedNoise,
+        usePinkNoise: config.usePinkNoise
+      });
       const gain = ctx.createGain();
       const amp = (config.amp ?? 0.9) * noiseAmp;
       gain.gain.setValueAtTime(0, t);
@@ -1097,12 +1513,12 @@ const stopPreview = () => {
 
     // main play routine
     const play = (t, d, f, opt = {}, nextVoiced = null, immediateNext = null) => {
-      const { breathy = false, amp = 0.9, burst = false, voiced = true, pitch = 220, short = false } = opt;
+      const { breathy = false, amp = 0.9, burst = false, voiced = true, pitch = 220, short = false, usePinkNoise = false } = opt;
       if (d <= 0) return;
 
       // If current phoneme is consonant/unvoiced or purely breathy/burst -> produce consonant-filtered noise
       if (opt.breathy || opt.burst) {
-        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, (opt.key === "s" || opt.key === "ch" || opt.key === "sh" || opt.key === "z" ) ? 0.5 : 0, Boolean(voiced));
+        playConsonantNoise(t, d, f, amp, opt.noiseAmp ?? 1, 0, opt.dynamicFadeOut, (opt.key === "s" || opt.key === "ch" || opt.key === "sh" || opt.key === "z" ) ? 0.5 : 0, Boolean(voiced), usePinkNoise);
         // If it's not voiced at all, we're done
         if (!voiced) return;
       }
@@ -1287,7 +1703,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         const noiseSrc = ctx.createBufferSource();
         // voiced-ish breathy component/aspiration => PINK
         const breathyNoiseAmp = (opt.noiseAmp ?? 1);
-        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.05 * breathyNoiseAmp });
+        noiseSrc.buffer = createFricativeNoiseBuffer(ctx, d, { voiced: true, amp: 0.05 * breathyNoiseAmp, usePinkNoise });
         if (sharedNoiseFilters.length > 0) {
           for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
         } else {
@@ -1324,6 +1740,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
     let oscGain = null;
     let lastVoicedEnd = 0;
     let currentAmp = 0.9;
+    let voicedFadeOutScheduled = false;
     // Tracks whether the global persistent LFO is currently connected to the
     // active oscillator's frequency param, so we can connect/disconnect it per
     // note (needed for per-phoneme bracket vibrato overrides and [vf:0] off).
@@ -1343,12 +1760,12 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         } else {
           scheduleWhisperFormants(t, p.d, p.f, p, nextVoiced, whisperRunStart);
           const whisperNoiseVoiced = !!p.voiced;
-          playWhisperNoise(t, p.d, p, { amp: p.amp ?? 0.9, noiseAmp: p.noiseAmp ?? 1, voiced: whisperNoiseVoiced }, p.key === "s" ? 0.5 : 0);
+          playWhisperNoise(t, p.d, p, { amp: p.amp ?? 0.9, noiseAmp: p.noiseAmp ?? 1, voiced: whisperNoiseVoiced, usePinkNoise: p.usePinkNoise }, p.key === "s" ? 0.5 : 0);
           whisperRunStart = false;
         }
       } else if (p.voiced) {
         if (p.burst) {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0, Boolean(p.voiced));
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0, Boolean(p.voiced), p.usePinkNoise);
         }
         const isRunStart = !currentOsc;
         if (!currentOsc) {
@@ -1367,6 +1784,14 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
             currentOsc.connect(oscGain).connect(master);
           }
           currentOsc.start(t);
+        }
+        const voicedAmp = isNaN(p.amp) ? 1 : p.amp;
+        if (voicedFadeOutScheduled) {
+          const fadeInEnd = t + Math.min(0.01, p.d);
+          oscGain.gain.setValueAtTime(0, t);
+          oscGain.gain.linearRampToValueAtTime(getVoicedGain(voicedAmp), fadeInEnd);
+          currentAmp = voicedAmp;
+          voicedFadeOutScheduled = false;
         }
 
         // schedule pitch
@@ -1462,6 +1887,16 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
 
         // update lastVoicedEnd
         lastVoicedEnd = t + p.d;
+        if (p.dynamicFadeOut) {
+          const finalBeat = Math.min(Math.max(0, beatLength), p.d);
+          const silenceDuration = 0.1 * finalBeat;
+          const fadeDuration = 0.05 * finalBeat;
+          const fadeEnd = lastVoicedEnd - silenceDuration;
+          const fadeStart = fadeEnd - fadeDuration;
+          oscGain.gain.setValueAtTime(getVoicedGain(currentAmp), fadeStart);
+          oscGain.gain.linearRampToValueAtTime(0, fadeEnd);
+          voicedFadeOutScheduled = true;
+        }
 
 // morphing logic
         // morphTo: ramp formants from p.f -> p.morphTo across the FULL phoneme duration
@@ -1520,7 +1955,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
           const noiseSrc = ctx.createBufferSource();
           // voiced-ish breathy component/aspiration => PINK
           const breathyNoiseAmp = (p.noiseAmp ?? 1);
-          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.05 * breathyNoiseAmp });
+          noiseSrc.buffer = createFricativeNoiseBuffer(ctx, p.d, { voiced: true, amp: 0.05 * breathyNoiseAmp, usePinkNoise: p.usePinkNoise });
           if (sharedNoiseFilters.length > 0) {
             for (const nf of sharedNoiseFilters) noiseSrc.connect(nf);
           } else {
@@ -1536,16 +1971,19 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         if (currentOsc) {
           // stop the oscillator with fade-out
           const fadeTime = 0.01;
-          oscGain.gain.setValueAtTime(getVoicedGain(currentAmp), lastVoicedEnd - fadeTime);
-          oscGain.gain.linearRampToValueAtTime(0, lastVoicedEnd);
+          if (!voicedFadeOutScheduled) {
+            oscGain.gain.setValueAtTime(getVoicedGain(currentAmp), lastVoicedEnd - fadeTime);
+            oscGain.gain.linearRampToValueAtTime(0, lastVoicedEnd);
+          }
           currentOsc.stop(lastVoicedEnd);
           currentOsc = null;
           oscGain = null;
+          voicedFadeOutScheduled = false;
         }
 
         // play consonant noise
         if (!p.voiced || mode === "whisper") {
-          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0, Boolean(p.voiced));
+          playConsonantNoise(t, p.d, p.f, p.amp, p.noiseAmp ?? 1, 0, p.dynamicFadeOut, p.key === "s" ? 0.5 : 0, Boolean(p.voiced), p.usePinkNoise);
         }
       }
 
@@ -1555,13 +1993,29 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
     // stop any remaining oscillator
     if (currentOsc) {
       const fadeTime = 0.01;
-      oscGain.gain.setValueAtTime(1 * currentAmp, lastVoicedEnd - fadeTime);
-      oscGain.gain.linearRampToValueAtTime(0, lastVoicedEnd);
+      if (!voicedFadeOutScheduled) {
+        oscGain.gain.setValueAtTime(1 * currentAmp, lastVoicedEnd - fadeTime);
+        oscGain.gain.linearRampToValueAtTime(0, lastVoicedEnd);
+      }
       currentOsc.stop(lastVoicedEnd);
     }
 
     master.connect(ctx.destination);
     return await ctx.startRendering();
+  };
+
+  const resampleAudio = (data, sourceRate, targetRate) => {
+    if (sourceRate === targetRate) return data;
+    const outputLength = Math.ceil(data.length * targetRate / sourceRate);
+    const output = new Float32Array(outputLength);
+    for (let index = 0; index < outputLength; index++) {
+      const sourcePosition = index * sourceRate / targetRate;
+      const lower = Math.floor(sourcePosition);
+      const fraction = sourcePosition - lower;
+      const next = Math.min(lower + 1, data.length - 1);
+      output[index] = data[lower] * (1 - fraction) + data[next] * fraction;
+    }
+    return output;
   };
 
   const previewPhoneme = async (key) => {
@@ -1707,6 +2161,9 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
       <textarea id="phonemeInput" rows="4" style="width:100%;font-family:monospace;">d<c2,0.1> o<c2,0.9> r<d2,0.1> e<d2,0.9> m<e2,0.1> i<e2,0.9> f<f2,0.1> a<f2,0.9> s<g2,0.1> o<g2,0.9> l<a2,0.1> a<a2,0.9> t<b2,0.1> i<b2,0.9> d<c3,0.1> o<c3,0.9></textarea>
     </label>
     <div style="margin-top:6px">
+      <label>Synthesis Method:
+        <select id="synthesisMethod"><option value="synthesized" selected>Synthesized</option><option value="concatenative">Concatenative</option></select>
+      </label>
       <label>Voice mode:
         <select id="voiceMode"><option value="voiced" selected>Voiced</option><option value="whisper">Whisper</option></select>
       </label>
@@ -1715,6 +2172,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
         <select id="gridType"><option value="beats" selected>Beats</option><option value="steps">Steps</option><option value="seconds">Seconds</option></select>
       </label>
       <label id="stepsPerBeatLabel" style="margin-left:8px">Steps/Beat: <input type="number" id="stepsPerBeat" value="4" min="1" style="width:60px"/></label>
+      <label style="margin-left:8px">Sample rate (Hz): <input type="number" id="sampleRate" value="44100" min="8000" max="192000" step="1" style="width:90px"/></label>
     </div>
     <div style="margin-top:6px">
       <label>Vibrato Freq (Hz): <input type="number" id="vibFreq" value="6" step="0.1" style="width:80px"/></label>
@@ -1817,7 +2275,7 @@ const hasMorphTo = voiceFilters.length > 0 && morphEnabled && opt.morphTo && opt
 
   const syntaxHelp = document.createElement("div");
   syntaxHelp.className = "syntax-help";
-  syntaxHelp.style = "position:fixed;left:10px;bottom:10px;width:320px;height:390px;min-width:240px;min-height:150px;max-width:80vw;max-height:80vh;overflow:hidden;padding:0;background:#fff;border:1px solid #999;border-radius:6px;box-sizing:border-box;font-family:monospace;font-size:11px;z-index:20;resize:both;transform-origin:center center;box-shadow:2px 2px 8px rgba(0,0,0,0.18);";
+  syntaxHelp.style = "display:none;position:fixed;left:10px;bottom:10px;width:320px;height:390px;min-width:240px;min-height:150px;max-width:80vw;max-height:80vh;overflow:hidden;padding:0;background:#fff;border:1px solid #999;border-radius:6px;box-sizing:border-box;font-family:monospace;font-size:11px;z-index:20;resize:both;transform-origin:center center;box-shadow:2px 2px 8px rgba(0,0,0,0.18);";
   syntaxHelp.innerHTML = `
     <div id="syntaxHelpHeader" style="display:flex;align-items:center;gap:6px;padding:7px 8px;background:#f2f2f2;border-bottom:1px solid #ccc;cursor:grab;user-select:none;touch-action:none;">
       <b style="flex:1;">Syntax Help</b>
@@ -1852,8 +2310,256 @@ vibFadeIn, vibSpeed</pre>
   syntaxReopen.type = "button";
   syntaxReopen.textContent = "Syntax Help";
   syntaxReopen.title = "Open syntax help";
-  syntaxReopen.style = "display:none;position:fixed;left:10px;bottom:10px;padding:5px 8px;z-index:20;";
+  syntaxReopen.style = "display:block;position:fixed;left:10px;bottom:10px;padding:5px 8px;z-index:20;";
   document.body.appendChild(syntaxReopen);
+
+  const dictionaryOpen = document.createElement("button");
+  dictionaryOpen.type = "button";
+  dictionaryOpen.textContent = "Dictionary";
+  dictionaryOpen.title = "Open personal dictionary";
+  dictionaryOpen.style = "display:block;position:fixed;left:10px;bottom:48px;padding:5px 8px;z-index:20;";
+  document.body.appendChild(dictionaryOpen);
+
+  const dictionaryPanel = document.createElement("div");
+  dictionaryPanel.style = "display:none;position:fixed;left:10px;bottom:10px;width:340px;max-width:80vw;height:360px;max-height:80vh;overflow:hidden;padding:0;background:#fff;border:1px solid #999;border-radius:6px;box-sizing:border-box;font-family:monospace;font-size:11px;z-index:22;box-shadow:2px 2px 8px rgba(0,0,0,0.18);";
+  dictionaryPanel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:6px;padding:7px 8px;background:#f2f2f2;border-bottom:1px solid #ccc;">
+      <b style="flex:1;">Personal Dictionary</b>
+      <button type="button" id="addDictionaryEntry" title="Add entry">+</button>
+      <button type="button" id="removeDictionaryEntry" title="Remove last entry">-</button>
+      <button type="button" id="closeDictionary" title="Close dictionary">x</button>
+    </div>
+    <div id="dictionaryRows" style="height:calc(100% - 36px);overflow:auto;padding:8px;box-sizing:border-box;"></div>`;
+  document.body.appendChild(dictionaryPanel);
+
+  const dictionaryRows = dictionaryPanel.querySelector("#dictionaryRows");
+  const removeDictionaryEntry = dictionaryPanel.querySelector("#removeDictionaryEntry");
+  const syncPersonalDictionary = () => {
+    const updated = {};
+    for (const row of dictionaryRows.children) {
+      const word = row.querySelector(".dictionary-word").value.trim().toLowerCase().replace(/[^a-z']/g, "");
+      const phonemes = row.querySelector(".dictionary-phonemes").value
+        .trim().toLowerCase().split(/[,\s]+/).filter(Boolean);
+      if (word && phonemes.length) updated[word] = phonemes;
+    }
+    personalDict = updated;
+    savePersonalDict(true);
+    removeDictionaryEntry.disabled = dictionaryRows.children.length === 0;
+  };
+  const addDictionaryRow = (word = "", phonemes = []) => {
+    const row = document.createElement("div");
+    row.style = "display:flex;flex-direction:column;gap:4px;margin-bottom:8px;padding:7px;border:1px solid #ccc;border-radius:4px;background:#fafafa;";
+    const wordInput = document.createElement("input");
+    wordInput.type = "text";
+    wordInput.className = "dictionary-word";
+    wordInput.placeholder = "Word";
+    wordInput.setAttribute("aria-label", "Dictionary word");
+    wordInput.value = word;
+    wordInput.style = "width:100%;box-sizing:border-box;";
+    const phonemeInput = document.createElement("input");
+    phonemeInput.type = "text";
+    phonemeInput.className = "dictionary-phonemes";
+    phonemeInput.placeholder = "Phoneme sequence (e.g. a r)";
+    phonemeInput.setAttribute("aria-label", "Phoneme sequence");
+    phonemeInput.value = phonemes.join(" ");
+    phonemeInput.style = "width:100%;box-sizing:border-box;";
+    wordInput.addEventListener("input", syncPersonalDictionary);
+    phonemeInput.addEventListener("input", syncPersonalDictionary);
+    row.append(wordInput, phonemeInput);
+    dictionaryRows.appendChild(row);
+  };
+  const renderPersonalDictionary = () => {
+    dictionaryRows.replaceChildren();
+    for (const [word, phonemes] of Object.entries(personalDict)) {
+      addDictionaryRow(word, Array.isArray(phonemes) ? phonemes : []);
+    }
+    removeDictionaryEntry.disabled = dictionaryRows.children.length === 0;
+  };
+  dictionaryPanel.querySelector("#addDictionaryEntry").addEventListener("click", () => {
+    addDictionaryRow();
+    syncPersonalDictionary();
+    dictionaryRows.lastElementChild.querySelector(".dictionary-word").focus();
+  });
+  removeDictionaryEntry.addEventListener("click", () => {
+    dictionaryRows.lastElementChild?.remove();
+    syncPersonalDictionary();
+  });
+  dictionaryOpen.addEventListener("click", () => {
+    renderPersonalDictionary();
+    dictionaryPanel.style.display = "block";
+    dictionaryOpen.style.display = "none";
+  });
+  dictionaryPanel.querySelector("#closeDictionary").addEventListener("click", () => {
+    dictionaryPanel.style.display = "none";
+    dictionaryOpen.style.display = "block";
+  });
+
+  const concatenativeOpen = document.createElement("button");
+  concatenativeOpen.type = "button";
+  concatenativeOpen.textContent = "Concatenative Phoneme Samples";
+  concatenativeOpen.style = "display:none;position:fixed;left:10px;bottom:86px;padding:5px 8px;z-index:20;";
+  document.body.appendChild(concatenativeOpen);
+
+  const concatenativePanel = document.createElement("div");
+  concatenativePanel.style = "display:none;position:fixed;left:10px;bottom:10px;width:340px;max-width:80vw;max-height:80vh;overflow:hidden;padding:0;background:#fff;border:1px solid #999;border-radius:6px;box-sizing:border-box;font-family:monospace;font-size:11px;z-index:21;box-shadow:2px 2px 8px rgba(0,0,0,0.18);";
+  concatenativePanel.innerHTML = `
+    <div style="display:flex;align-items:center;padding:7px 8px;background:#f2f2f2;border-bottom:1px solid #ccc;">
+      <b style="flex:1;">Concatenative Samples</b>
+      <button type="button" id="closeConcatenative">x</button>
+    </div>
+    <div style="display:flex;gap:6px;padding:8px 8px 0;">
+      <button type="button" id="exportVoicebank">Export voicebank</button>
+      <button type="button" id="importVoicebank">Import voicebank</button>
+      <input type="file" id="voicebankFile" accept=".jsvoicebank,application/json" style="display:none;" />
+    </div>
+    <div id="voicebankStatus" style="padding:4px 8px;color:#555;"></div>
+    <div id="concatenativeSampleList" style="overflow:auto;max-height:calc(80vh - 84px);padding:8px;"></div>`;
+  document.body.appendChild(concatenativePanel);
+
+  const concatenativeSampleList = concatenativePanel.querySelector("#concatenativeSampleList");
+  const voicebankStatus = concatenativePanel.querySelector("#voicebankStatus");
+  const voicebankFile = concatenativePanel.querySelector("#voicebankFile");
+  concatenativePanel.querySelector("#exportVoicebank").addEventListener("click", () => {
+    try {
+      const samples = [];
+      for (const [key, sample] of concatenativeSamples) {
+        const audio = sample.buffer.getChannelData(0);
+        const bytes = new Uint8Array(audio.length * 4);
+        const view = new DataView(bytes.buffer);
+        for (let index = 0; index < audio.length; index++) view.setFloat32(index * 4, audio[index], true);
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+        }
+        samples.push({ key, sampleRate: sample.buffer.sampleRate, encoding: "float32le", data: btoa(binary), fileName: sample.fileName, fileType: sample.fileType });
+      }
+      if (!samples.length) {
+        voicebankStatus.textContent = "Upload at least one phoneme sample first.";
+        return;
+      }
+      const payload = { format: "jsvoicebank", version: 1, samples };
+      const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = "voicebank.jsvoicebank";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+      voicebankStatus.textContent = `Exported ${samples.length} samples.`;
+    } catch (error) {
+      voicebankStatus.textContent = `Export failed: ${error.message || error}`;
+    }
+  });
+  concatenativePanel.querySelector("#importVoicebank").addEventListener("click", () => voicebankFile.click());
+  voicebankFile.addEventListener("change", async () => {
+    const file = voicebankFile.files?.[0];
+    if (!file) return;
+    let audioCtx;
+    try {
+      voicebankStatus.textContent = "Importing voicebank...";
+      const payload = JSON.parse(await file.text());
+      if (payload?.format !== "jsvoicebank" || payload.version !== 1 || !Array.isArray(payload.samples)) {
+        throw new Error("Unsupported or invalid voicebank format.");
+      }
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const imported = new Map();
+      for (const item of payload.samples) {
+        if (!concatenativeRequiredPhonemes.includes(item.key) || item.encoding !== "float32le" ||
+            !Number.isFinite(item.sampleRate) || item.sampleRate < 8000 || item.sampleRate > 384000 || typeof item.data !== "string") {
+          throw new Error("Voicebank contains an invalid sample entry.");
+        }
+        const binary = atob(item.data);
+        if (!binary.length || binary.length % 4 !== 0) throw new Error(`Invalid audio data for ${item.key}.`);
+        const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+        const view = new DataView(bytes.buffer);
+        const buffer = audioCtx.createBuffer(1, bytes.length / 4, item.sampleRate);
+        const channel = buffer.getChannelData(0);
+        for (let index = 0; index < channel.length; index++) channel[index] = view.getFloat32(index * 4, true);
+        for (const value of channel) {
+          if (!Number.isFinite(value)) throw new Error(`Non-finite audio data for ${item.key}.`);
+        }
+        imported.set(item.key, {
+          buffer,
+          formants: estimateSampleFormants(buffer),
+          pitch: estimateSamplePitch(buffer),
+          fileName: typeof item.fileName === "string" ? item.fileName : `${item.key}.wav`,
+          fileType: typeof item.fileType === "string" ? item.fileType : "audio/wav"
+        });
+      }
+      if (!imported.size) throw new Error("Voicebank contains no samples.");
+      concatenativeSamples.clear();
+      for (const [key, sample] of imported) concatenativeSamples.set(key, sample);
+      renderConcatenativeSampleList();
+      voicebankStatus.textContent = `Imported ${imported.size} samples.`;
+    } catch (error) {
+      voicebankStatus.textContent = `Import failed: ${error.message || error}`;
+    } finally {
+      if (audioCtx) try { await audioCtx.close(); } catch (error) {}
+      voicebankFile.value = "";
+    }
+  });
+  const renderConcatenativeSampleList = () => {
+    concatenativeSampleList.innerHTML = "";
+    for (const key of concatenativeRequiredPhonemes) {
+      const row = document.createElement("div");
+      row.style = "display:flex;align-items:center;gap:6px;margin-bottom:5px;min-height:22px;";
+      const label = document.createElement("b");
+      label.textContent = `${key}:`;
+      label.style = "width:38px;flex:0 0 38px;";
+      const upload = document.createElement("button");
+      upload.type = "button";
+      upload.textContent = "Upload";
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "audio/*";
+      input.style.display = "none";
+      const status = document.createElement("span");
+      status.style = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;";
+      if (key === "rest") status.title = "If for some reason rest is a SFX, go ahead";
+      const updateRow = () => {
+        const sample = concatenativeSamples.get(key);
+        upload.style.display = sample ? "none" : "inline-block";
+        status.textContent = sample ? `${sample.fileName} (${sample.fileType || "audio"})` : key === "rest" ? "if for some reason rest is a SFX, go ahead" : "";
+        row.querySelectorAll(".sample-remove").forEach(remove => remove.remove());
+        if (sample) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "sample-remove";
+          remove.textContent = "X";
+          remove.title = `Remove ${key} sample`;
+          remove.addEventListener("click", () => { concatenativeSamples.delete(key); updateRow(); });
+          row.appendChild(remove);
+        }
+      };
+      upload.addEventListener("click", () => input.click());
+      input.addEventListener("change", async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try {
+          status.textContent = "Decoding...";
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const buffer = await audioCtx.decodeAudioData(await file.arrayBuffer());
+          concatenativeSamples.set(key, { buffer, formants: estimateSampleFormants(buffer), pitch: estimateSamplePitch(buffer), fileName: file.name, fileType: file.type });
+          try { await audioCtx.close(); } catch (error) {}
+          updateRow();
+        } catch (error) {
+          status.textContent = `Error: ${error.message || error}`;
+        }
+      });
+      row.append(label, upload, input, status);
+      concatenativeSampleList.appendChild(row);
+      updateRow();
+    }
+  };
+  renderConcatenativeSampleList();
+  concatenativeOpen.addEventListener("click", () => {
+    concatenativePanel.style.display = "block";
+    concatenativeOpen.style.display = "none";
+  });
+  concatenativePanel.querySelector("#closeConcatenative").addEventListener("click", () => {
+    concatenativePanel.style.display = "none";
+    concatenativeOpen.style.display = "block";
+  });
 
   const syntaxHeader = syntaxHelp.querySelector("#syntaxHelpHeader");
   const syntaxBody = syntaxHelp.querySelector("#syntaxHelpBody");
@@ -1950,6 +2656,12 @@ vibFadeIn, vibSpeed</pre>
 
   const gridTypeEl = container.querySelector("#gridType");
   const stepsLabel = container.querySelector("#stepsPerBeatLabel");
+  const synthesisMethodEl = container.querySelector("#synthesisMethod");
+  synthesisMethodEl.addEventListener("change", event => {
+    synthesisMethod = event.target.value;
+    concatenativeOpen.style.display = synthesisMethod === "concatenative" ? "block" : "none";
+    if (synthesisMethod !== "concatenative") concatenativePanel.style.display = "none";
+  });
   gridTypeEl.addEventListener("change", () => {
     stepsLabel.style.display = gridTypeEl.value === "steps" ? "inline-block" : "none";
   });
@@ -1999,6 +2711,19 @@ vibFadeIn, vibSpeed</pre>
   const synthBtn = container.querySelector("#synthBtn");
   const outputControls = container.querySelector("#outputControls");
   const statusEl = container.querySelector("#status");
+  const sampleRateEl = container.querySelector("#sampleRate");
+  const updateSampleRate = () => {
+    const value = Number(sampleRateEl.value);
+    if (!Number.isInteger(value) || value < 8000 || value > 192000) return false;
+    sampleRate = value;
+    return true;
+  };
+  sampleRateEl.addEventListener("change", () => {
+    if (!updateSampleRate()) {
+      sampleRateEl.value = String(sampleRate);
+      statusEl.textContent = "Sample rate must be between 8000 and 192000 Hz.";
+    }
+  });
   const useCMUChk = container.querySelector("#useCMU");
   const loadCMUBtn = container.querySelector("#loadCMU");
 
@@ -2021,6 +2746,7 @@ vibFadeIn, vibSpeed</pre>
   });
   loadDictBtn.addEventListener("click", () => {
     loadPersonalDict();
+    renderPersonalDictionary();
     statusEl.textContent = "Personal dictionary loaded.";
   });
 
@@ -2336,6 +3062,7 @@ vibFadeIn, vibSpeed</pre>
     stopPreview();
     outputControls.innerHTML = ""; statusEl.textContent = "Parsing...";
     try {
+      if (!updateSampleRate()) throw new Error("Sample rate must be between 8000 and 192000 Hz.");
       const text = container.querySelector("#phonemeInput").value;
       const mode = container.querySelector("#voiceMode").value;
       const bpm = parseFloat(container.querySelector("#bpm").value) || 120;
@@ -2359,13 +3086,14 @@ vibFadeIn, vibSpeed</pre>
 
       const totalDuration = phonemeSeq.reduce((a,p) => a + p.d, 0);
       statusEl.textContent = `Rendering ${totalDuration.toFixed(2)}s...`;
-      const offlineCtx = new OfflineAudioContext(1, Math.ceil(totalDuration * sampleRate) + 128, sampleRate);
+      const renderSampleRate = synthesisMethod === "synthesized" ? 22050 : sampleRate;
+      const offlineCtx = new OfflineAudioContext(1, Math.ceil(totalDuration * renderSampleRate) + 128, renderSampleRate);
 
-      const renderedBuffer = await synthesize(offlineCtx, phonemeSeq, mode, vibratoFreq, vibratoDepth, vibratoDelay, morphTime, enableMorph, slideTime, portamento, persistentVib, dynamicMode, consonantDuration, vibratoFadeIn);
+      const renderedBuffer = await synthesize(offlineCtx, phonemeSeq, mode, vibratoFreq, vibratoDepth, vibratoDelay, morphTime, enableMorph, slideTime, portamento, persistentVib, dynamicMode, consonantDuration, vibratoFadeIn, synthesisMethod, beatLen);
       statusEl.textContent = "Done";
 
       // WAV creation & preview
-      const audioDataRaw = renderedBuffer.getChannelData(0);
+      const audioDataRaw = resampleAudio(renderedBuffer.getChannelData(0), renderedBuffer.sampleRate, sampleRate);
 
       // Optional output normalization (preview + downloaded WAV)
       const enableNormalize = !!container.querySelector("#enableNormalize")?.checked;
@@ -2432,32 +3160,89 @@ vibFadeIn, vibSpeed</pre>
 
       const playBtn = document.createElement("button");
       playBtn.textContent = "Preview"; playBtn.style = "margin-top:8px;padding:6px 12px;";
-playBtn.onclick = () => {
+      const previewWaveform = document.createElement("canvas");
+      previewWaveform.width = 960;
+      previewWaveform.height = 96;
+      previewWaveform.setAttribute("role", "slider");
+      previewWaveform.setAttribute("aria-label", "Audio waveform. Click or use arrow keys to seek and play.");
+      previewWaveform.setAttribute("aria-valuemin", "0");
+      previewWaveform.setAttribute("aria-valuemax", String(audioData.length / sampleRate));
+      previewWaveform.setAttribute("aria-valuenow", "0");
+      previewWaveform.setAttribute("aria-valuetext", "0.00 seconds");
+      previewWaveform.tabIndex = 0;
+      previewWaveform.style = "display:block;width:100%;height:72px;margin-top:8px;border:1px solid #cbd5e1;border-radius:4px;background:#f4f7fb;cursor:pointer;touch-action:pan-y;";
+      const previewDuration = audioData.length / sampleRate;
+      drawPreviewWaveform = (playheadSeconds) => {
+        const canvasContext = previewWaveform.getContext("2d");
+        const width = previewWaveform.width;
+        const height = previewWaveform.height;
+        const middle = height / 2;
+        canvasContext.clearRect(0, 0, width, height);
+        canvasContext.fillStyle = "#f4f7fb";
+        canvasContext.fillRect(0, 0, width, height);
+        canvasContext.fillStyle = "#64748b";
+        for (let x = 0; x < width; x++) {
+          const start = Math.floor(x * audioData.length / width);
+          const end = Math.min(audioData.length, Math.max(start + 1, Math.floor((x + 1) * audioData.length / width)));
+          let peak = 0;
+          for (let sample = start; sample < end; sample++) {
+            peak = Math.max(peak, Math.abs(audioData[sample]));
+          }
+          const amplitude = Math.max(1, peak * (height * 0.44));
+          canvasContext.fillRect(x, middle - amplitude, 1, amplitude * 2);
+        }
+        if (playheadSeconds !== null) {
+          const progress = Math.max(0, Math.min(1, playheadSeconds / previewDuration));
+          canvasContext.fillStyle = "#1677ff";
+          canvasContext.fillRect(Math.round(progress * (width - 2)), 0, 2, height);
+          const currentTime = progress * previewDuration;
+          previewWaveform.setAttribute("aria-valuenow", currentTime.toFixed(2));
+          previewWaveform.setAttribute("aria-valuetext", `${currentTime.toFixed(2)} seconds`);
+        }
+      };
+      drawPreviewWaveform(0);
+
+      const playPreviewAt = (requestedSeconds = 0) => {
         stopPreview();
+        const startSeconds = Math.max(0, Math.min(previewDuration - 1 / sampleRate, requestedSeconds));
         actx = new (window.AudioContext || window.webkitAudioContext)();
         prevSrc = actx.createBufferSource();
         // Preview should match the downloaded WAV (normalized if enabled).
         previewBuf = actx.createBuffer(1, audioData.length, sampleRate);
         previewBuf.getChannelData(0).set(audioData);
         prevSrc.buffer = previewBuf;
-        // Start the real-time formant mouth visualization.
+        // Keep the mouth animation and waveform playhead aligned to the seek point.
         visualSeq = phonemeSeq;
-        visualStartTime = actx.currentTime;
+        visualStartTime = actx.currentTime - startSeconds;
         startVisualAnim();
-prevSrc.onended = () => {
+        const source = prevSrc;
+        const playbackContext = actx;
+        source.onended = () => {
           // natural-end cleanup: free shared preview state so a new preview can start
-          prevSrc = null;
+          if (previewFrameId !== null) cancelAnimationFrame(previewFrameId);
+          previewFrameId = null;
+          drawPreviewWaveform(previewDuration);
+          if (prevSrc === source) prevSrc = null;
           previewBuf = null;
           stopVisualAnim();
           setVisualIdle();
-          if (actx) {
+          if (actx === playbackContext) {
             try { actx.close(); } catch (e) {}
             actx = null;
           }
         };
-        prevSrc.connect(actx.destination);
-        prevSrc.start();
+        source.connect(actx.destination);
+        source.start(0, startSeconds);
+        const animatePreviewPlayhead = () => {
+          if (prevSrc !== source || actx !== playbackContext) return;
+          const elapsed = Math.max(0, playbackContext.currentTime - visualStartTime);
+          drawPreviewWaveform(Math.min(previewDuration, elapsed));
+          if (elapsed < previewDuration) previewFrameId = requestAnimationFrame(animatePreviewPlayhead);
+          else previewFrameId = null;
+        };
+        animatePreviewPlayhead();
       };
+      playBtn.onclick = () => playPreviewAt(0);
 
       const stopBtn = document.createElement("button");
       stopBtn.textContent = "Stop Preview"; stopBtn.style = "margin-top:8px;padding:6px 12px;";
@@ -2465,8 +3250,53 @@ prevSrc.onended = () => {
         stopPreview();
       };
 
+      const saveAsBtn = document.createElement("button");
+      saveAsBtn.textContent = "Save WAV As...";
+      saveAsBtn.style = "margin-top:8px;margin-left:8px;padding:6px 12px;";
+      saveAsBtn.onclick = async () => {
+        const suggestedName = `${safeName}-${Date.now()}.wav`;
+        if (typeof window.showSaveFilePicker === "function") {
+          try {
+            const fileHandle = await window.showSaveFilePicker({
+              suggestedName,
+              types: [{ description: "WAV audio", accept: { "audio/wav": [".wav"] } }]
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            statusEl.textContent = "WAV saved.";
+          } catch (error) {
+            if (error.name !== "AbortError") {
+              console.error(error);
+              statusEl.textContent = `Save failed: ${error.message || error}`;
+            }
+          }
+        } else {
+          dl.click();
+          statusEl.textContent = "Save location selection is not supported here; downloaded to the browser's default location.";
+        }
+      };
+      previewWaveform.addEventListener("click", (event) => {
+        const bounds = previewWaveform.getBoundingClientRect();
+        const position = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+        playPreviewAt(position * previewDuration);
+      });
+      previewWaveform.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          playPreviewAt(Number(previewWaveform.getAttribute("aria-valuenow")) || 0);
+        } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          event.preventDefault();
+          const direction = event.key === "ArrowRight" ? 1 : -1;
+          const position = Number(previewWaveform.getAttribute("aria-valuenow")) || 0;
+          playPreviewAt(Math.max(0, Math.min(previewDuration, position + direction * Math.max(0.1, previewDuration / 100))));
+        }
+      });
+
       outputControls.appendChild(playBtn);
       outputControls.appendChild(stopBtn);
+      outputControls.appendChild(saveAsBtn);
+      outputControls.appendChild(previewWaveform);
 
       const exportBtn = document.createElement("button");
       exportBtn.textContent = "Export Animation (WebM)";
@@ -2638,7 +3468,7 @@ prevSrc.onended = () => {
     // --- Phoneme & State check ---
     // Treat missing phone/key or explicitly idle keys as rest
     const effectiveKey = phonemeKey || "rest";
-    const closedMouthPhonemes = ["m", "b", "p", "v", "f", "rest"];
+    const closedMouthPhonemes = ["m", "b", "p", "v", "f", "bx", "rest"];
     const isClosedMouth = !phone || closedMouthPhonemes.includes(effectiveKey);
 
     const phData = phonemeMap[effectiveKey];
@@ -2666,8 +3496,8 @@ prevSrc.onended = () => {
 
     // --- Smooth Height Interpolation (Lerp) ---
     // Adjust 0.2 to make closing faster (e.g. 0.3) or smoother/slower (e.g. 0.1)
-    currentMouthH += (targetMouthH - currentMouthH) * 0.15;
-    currentMouthW += (targetMouthW - currentMouthW) * 0.15;
+    currentMouthH += (targetMouthH - currentMouthH) * 0.55;
+    currentMouthW += (targetMouthW - currentMouthW) * 0.55;
 
     const mouthW = currentMouthW;
     const mouthH = currentMouthH;
